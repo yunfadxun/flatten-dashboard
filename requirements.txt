@@ -1,0 +1,11 @@
+# --- Core Data Processing ---
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# --- GIS & Spatial Data ---
+geopandas>=0.13.0
+pyogrio>=0.6.0
+
+# --- Web Dashboard & Visualization ---
+streamlit>=1.25.0
+plotly>=5.15.0

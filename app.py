@@ -1,184 +1,726 @@
+# ============================================================
+# STREAMLIT APP: SURVEILANS MR - TAHAP 1
+# UPLOAD DAN FLATTEN HEADER EXCEL
+# ============================================================
+
 import re
 import zipfile
+import traceback
 from io import BytesIO
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+
 from openpyxl.utils import get_column_letter
 
-st.set_page_config(page_title="Surveilans MR — Tahap 1", page_icon="🗺️", layout="wide")
-st.title("Dashboard Surveilans Campak-Rubella")
-st.subheader("Tahap 1 — Upload dan Flatten Header Excel")
-st.info(
-    "Versi ini sengaja hanya menjalankan flatten header terlebih dahulu. "
-    "Proses boundary, matching, dan pembuatan peta belum dijalankan agar aplikasi Streamlit Cloud lebih ringan."
+
+# ============================================================
+# 1. KONFIGURASI STREAMLIT
+# ============================================================
+
+st.set_page_config(
+    page_title="Dashboard Surveilans MR",
+    page_icon="📊",
+    layout="wide"
 )
+
+st.title("Dashboard Surveilans Campak-Rubella")
+
+st.subheader("Tahap 1 — Flatten Header Excel")
+
+st.info(
+    "Tahap ini hanya memproses header Excel. "
+    "Proses boundary, matching wilayah, validasi indikator, "
+    "dan pembuatan peta akan dilakukan pada tahap berikutnya."
+)
+
+
+# ============================================================
+# 2. KONFIGURASI PEMROSESAN
+# ============================================================
+
+SHEET_ANALISIS = "Tabel Analisis"
+
+SHEET_KAKO = "Tabel Analisis Pusat by Kab"
+
+HEADER_START = 8
+HEADER_END = 9
+DATA_START = 10
+
+MAX_FILE_SIZE_MB = 50
+
 
 st.markdown(
-    "**Format yang dibutuhkan:** 3 file Excel untuk tahun 2023, 2024, dan 2025. "
-    "Pada setiap file, aplikasi mencari sheet `Tabel Analisis` dan `Tabel Analisis Pusat by Kab`, "
-    "menggunakan header baris 9–10 (indeks Python 8–9) dan data mulai baris 11 (indeks Python 10)."
+    """
+    **Ketentuan file:**
+    - Format: XLSM atau XLSX.
+    - Header: baris Excel 9–10.
+    - Data dimulai dari baris Excel 11.
+    - Sheet yang diproses:
+        1. `Tabel Analisis`
+        2. `Tabel Analisis Pusat by Kab`
+    """
 )
+
+
+# ============================================================
+# 3. UPLOAD FILE
+# ============================================================
 
 uploaded_files = st.file_uploader(
-    "Unggah file Excel 2023, 2024, dan 2025",
-    type=["xlsx", "xlsm"],
+    "Upload file Excel",
+    type=["xlsm", "xlsx"],
     accept_multiple_files=True,
-    help="Nama file harus memuat tahun 2023, 2024, atau 2025. File .xls tidak didukung pada versi ini."
+    help=(
+        "Upload file Excel yang akan diproses. "
+        f"Maksimum {MAX_FILE_SIZE_MB} MB per file."
+    )
 )
 
 
-def norm_sheet(name: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+# ============================================================
+# 4. NORMALISASI NAMA SHEET
+# ============================================================
+
+def normalisasi_nama_sheet(nama):
+
+    return re.sub(
+        r"[^a-z0-9]",
+        "",
+        str(nama).lower()
+    )
 
 
-def find_sheet(sheet_names, target):
-    normalized_target = norm_sheet(target)
-    for name in sheet_names:
-        if norm_sheet(name) == normalized_target:
-            return name
-    for name in sheet_names:
-        if normalized_target in norm_sheet(name):
-            return name
+# ============================================================
+# 5. CARI SHEET
+# ============================================================
+
+def cari_sheet(sheet_names, target_sheet):
+
+    target_normal = normalisasi_nama_sheet(
+        target_sheet
+    )
+
+    # Pencarian nama yang sama setelah normalisasi.
+    for nama in sheet_names:
+
+        if normalisasi_nama_sheet(nama) == target_normal:
+            return nama
+
+    # Pencarian nama target sebagai bagian nama sheet.
+    for nama in sheet_names:
+
+        if target_normal in normalisasi_nama_sheet(nama):
+            return nama
+
     return None
 
 
-def flatten_sheet(file_bytes: bytes, sheet_name: str, header_start=8, header_end=9, data_start=10):
-    raw = pd.read_excel(
-        BytesIO(file_bytes), sheet_name=sheet_name, header=None, engine="openpyxl"
-    )
-    if raw.empty:
-        raise ValueError(f"Sheet '{sheet_name}' kosong.")
-    if len(raw) <= header_end:
-        raise ValueError(f"Sheet '{sheet_name}' tidak memiliki baris header 9–10.")
+# ============================================================
+# 6. FLATTEN HEADER
+# ============================================================
 
-    header_rows = raw.iloc[header_start:header_end + 1].copy()
-    header_rows = header_rows.applymap(
-        lambda x: str(x).strip() if pd.notna(x) and str(x).strip() else None
+def flatten_excel_header(
+    file_bytes,
+    sheet_name,
+    header_start=HEADER_START,
+    header_end=HEADER_END,
+    data_start=DATA_START
+):
+
+    # Baca data mentah tanpa header.
+    raw = pd.read_excel(
+        BytesIO(file_bytes),
+        sheet_name=sheet_name,
+        header=None,
+        engine="openpyxl"
     )
+
+    if raw.empty:
+
+        raise ValueError(
+            f"Sheet '{sheet_name}' tidak memiliki data."
+        )
+
+    if len(raw) <= header_end:
+
+        raise ValueError(
+            f"Header baris 9–10 tidak ditemukan "
+            f"pada sheet '{sheet_name}'."
+        )
+
+    # Ambil dua baris header.
+    header_rows = raw.iloc[
+        header_start:header_end + 1
+    ].copy()
+
+    # Bersihkan nilai header.
+    header_rows = header_rows.map(
+        lambda x: (
+            str(x).strip()
+            if pd.notna(x) and str(x).strip() != ""
+            else None
+        )
+    )
+
+    # Isi header kelompok ke kanan.
     header_rows = header_rows.ffill(axis=1)
 
-    columns = []
+    # Gabungkan nama header.
+    new_columns = []
+
     for col_idx in range(raw.shape[1]):
+
         parts = []
+
         for row_idx in range(len(header_rows)):
-            value = header_rows.iloc[row_idx, col_idx]
+
+            value = header_rows.iloc[
+                row_idx,
+                col_idx
+            ]
+
             if value is not None:
+
                 value = str(value).strip()
-                if value and (not parts or value != parts[-1]):
+
+                if value and (
+                    not parts or value != parts[-1]
+                ):
+
                     parts.append(value)
-        columns.append("_".join(parts) if parts else f"Kolom_{col_idx + 1}")
 
-    seen = {}
-    unique_columns = []
-    for col in columns:
-        if col not in seen:
-            seen[col] = 0
-            unique_columns.append(col)
+        if parts:
+
+            col_name = "_".join(parts)
+
         else:
-            seen[col] += 1
-            unique_columns.append(f"{col}_{seen[col]}")
 
+            col_name = f"Kolom_{col_idx + 1}"
+
+        new_columns.append(col_name)
+
+    # Pastikan nama kolom unik.
+    seen = {}
+
+    unique_columns = []
+
+    for col in new_columns:
+
+        if col not in seen:
+
+            seen[col] = 0
+
+            unique_columns.append(col)
+
+        else:
+
+            seen[col] += 1
+
+            unique_columns.append(
+                f"{col}_{seen[col]}"
+            )
+
+    # Ambil data setelah baris header.
     df = raw.iloc[data_start:].copy()
+
     df.columns = unique_columns
-    df = df.dropna(how="all").dropna(axis=1, how="all")
+
+    # Hapus baris yang seluruhnya kosong.
+    df = df.dropna(how="all")
+
+    # Hapus kolom yang seluruh datanya kosong.
+    df = df.dropna(
+        axis=1,
+        how="all"
+    )
+
     return df.reset_index(drop=True)
 
 
-def flatten_workbook(file_bytes: bytes, filename: str):
-    xls = pd.ExcelFile(BytesIO(file_bytes), engine="openpyxl")
-    targets = [
-        ("Tabel Analisis", "Tabel Analisis"),
-        ("Tabel Analisis Pusat by Kab", "Analisis Pusat by Kab"),
-    ]
-    sheets = {}
-    logs = []
-    for target, output_name in targets:
-        source_sheet = find_sheet(xls.sheet_names, target)
-        if source_sheet is None:
-            logs.append({"File": filename, "Sheet": target, "Status": "Tidak ditemukan", "Baris": 0, "Kolom": 0})
-            continue
-        df = flatten_sheet(file_bytes, source_sheet)
-        sheets[output_name] = df
-        logs.append({"File": filename, "Sheet": target, "Status": "Berhasil", "Baris": len(df), "Kolom": len(df.columns)})
+# ============================================================
+# 7. SIMPAN HASIL KE EXCEL
+# ============================================================
 
-    if not sheets:
-        raise ValueError("Tidak ditemukan sheet 'Tabel Analisis' maupun 'Tabel Analisis Pusat by Kab'.")
+def dataframe_to_excel(hasil_sheet):
 
     output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        for sheet_name, df in sheets.items():
-            safe_name = sheet_name[:31]
-            df.to_excel(writer, sheet_name=safe_name, index=False)
-            ws = writer.sheets[safe_name]
+
+    with pd.ExcelWriter(
+        output,
+        engine="openpyxl"
+    ) as writer:
+
+        for nama_sheet, df in hasil_sheet.items():
+
+            nama_sheet_output = nama_sheet[:31]
+
+            df.to_excel(
+                writer,
+                sheet_name=nama_sheet_output,
+                index=False
+            )
+
+            ws = writer.sheets[nama_sheet_output]
+
+            # Bekukan baris header.
             ws.freeze_panes = "A2"
+
+            # Aktifkan filter.
             ws.auto_filter.ref = ws.dimensions
-            # Batasi lebar kolom tanpa memindai seluruh worksheet berulang kali.
-            for idx, col_name in enumerate(df.columns, start=1):
-                sample_values = df[col_name].head(200).tolist()
-                max_len = max([len(str(col_name))] + [len(str(v)) for v in sample_values if pd.notna(v)])
-                ws.column_dimensions[get_column_letter(idx)].width = min(max_len + 2, 40)
-    return output.getvalue(), logs
+
+            # Atur lebar kolom berdasarkan sampel data.
+            for col_idx, col_name in enumerate(
+                df.columns,
+                start=1
+            ):
+
+                sample_values = df[col_name].head(200)
+
+                max_length = max(
+                    [len(str(col_name))]
+                    + [
+                        len(str(value))
+                        for value in sample_values
+                        if pd.notna(value)
+                    ]
+                )
+
+                col_letter = get_column_letter(
+                    col_idx
+                )
+
+                ws.column_dimensions[
+                    col_letter
+                ].width = min(
+                    max_length + 2,
+                    40
+                )
+
+    output.seek(0)
+
+    return output.getvalue()
 
 
-if st.button("Jalankan Tahap 1 — Flatten Header", type="primary", disabled=not uploaded_files):
-    if len(uploaded_files) != 3:
-        st.error(f"Unggah tepat 3 file: 2023, 2024, dan 2025. Saat ini ada {len(uploaded_files)} file.")
-        st.stop()
+# ============================================================
+# 8. PROSES SATU FILE
+# ============================================================
 
-    years = {}
-    for f in uploaded_files:
-        matches = re.findall(r"202[345]", f.name)
-        if not matches:
-            st.error(f"Nama file '{f.name}' tidak memuat tahun 2023, 2024, atau 2025.")
-            st.stop()
-        year = matches[0]
-        if year in years:
-            st.error(f"Ada lebih dari satu file untuk tahun {year}: '{years[year]}' dan '{f.name}'.")
-            st.stop()
-        years[year] = f.name
-    missing = sorted(set(["2023", "2024", "2025"]) - set(years))
-    if missing:
-        st.error("File untuk tahun berikut belum ada: " + ", ".join(missing))
-        st.stop()
+def proses_satu_file(file_bytes, nama_file):
 
-    zip_buffer = BytesIO()
-    all_logs = []
-    errors = []
-    progress = st.progress(0, text="Menyiapkan proses...")
-    ordered_files = sorted(uploaded_files, key=lambda f: re.findall(r"202[345]", f.name)[0])
+    hasil_sheet = {}
 
-    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for i, uploaded in enumerate(ordered_files, start=1):
-            progress.progress((i - 1) / len(ordered_files), text=f"Memproses {uploaded.name} ({i}/{len(ordered_files)})...")
-            try:
-                flattened_bytes, logs = flatten_workbook(uploaded.getvalue(), uploaded.name)
-                out_name = re.sub(r"\.(xlsx|xlsm)$", "", uploaded.name, flags=re.I) + "_Flatten_Header.xlsx"
-                zf.writestr(out_name, flattened_bytes)
-                all_logs.extend(logs)
-            except Exception as exc:
-                errors.append({"File": uploaded.name, "Error": str(exc)})
-            progress.progress(i / len(ordered_files), text=f"Selesai memeriksa {uploaded.name} ({i}/{len(ordered_files)})")
+    log = []
 
-    st.session_state["flatten_logs"] = all_logs
-    st.session_state["flatten_errors"] = errors
-    st.session_state["flatten_zip"] = zip_buffer.getvalue() if not errors else None
+    # Baca daftar sheet.
+    excel = pd.ExcelFile(
+        BytesIO(file_bytes),
+        engine="openpyxl"
+    )
 
-if "flatten_logs" in st.session_state:
-    st.markdown("### Hasil Tahap 1")
-    if st.session_state.get("flatten_logs"):
-        st.dataframe(pd.DataFrame(st.session_state["flatten_logs"]), use_container_width=True, hide_index=True)
-    if st.session_state.get("flatten_errors"):
-        st.error("Ada file yang gagal diproses. Periksa detail berikut sebelum melanjutkan.")
-        st.dataframe(pd.DataFrame(st.session_state["flatten_errors"]), use_container_width=True, hide_index=True)
-    elif st.session_state.get("flatten_zip"):
-        st.success("Flatten selesai untuk ketiga file. Unduh dan periksa hasilnya sebelum masuk ke tahap matching.")
-        st.download_button(
-            "Unduh ZIP hasil flatten",
-            data=st.session_state["flatten_zip"],
-            file_name="Hasil_Flatten_Header_MR.zip",
-            mime="application/zip",
-            type="primary",
+    sheet_names = excel.sheet_names
+
+    # --------------------------------------------------------
+    # SHEET TABEL ANALISIS
+    # --------------------------------------------------------
+
+    sheet_analisis = cari_sheet(
+        sheet_names,
+        SHEET_ANALISIS
+    )
+
+    if sheet_analisis:
+
+        df_analisis = flatten_excel_header(
+            file_bytes=file_bytes,
+            sheet_name=sheet_analisis
         )
 
-st.caption("Tahap berikutnya (boundary, matching, validasi indikator, dan peta) akan ditambahkan setelah hasil flatten ini terverifikasi.")
+        hasil_sheet[
+            "Tabel Analisis"
+        ] = df_analisis
+
+        log.append({
+            "Nama File": nama_file,
+            "Sheet": SHEET_ANALISIS,
+            "Status": "Berhasil",
+            "Baris": len(df_analisis),
+            "Kolom": len(df_analisis.columns),
+            "Keterangan": "Header berhasil di-flatten."
+        })
+
+    else:
+
+        log.append({
+            "Nama File": nama_file,
+            "Sheet": SHEET_ANALISIS,
+            "Status": "Tidak ditemukan",
+            "Baris": 0,
+            "Kolom": 0,
+            "Keterangan": (
+                "Sheet tidak ditemukan. "
+                f"Sheet tersedia: {sheet_names}"
+            )
+        })
+
+    # --------------------------------------------------------
+    # SHEET TABEL ANALISIS PUSAT BY KAB
+    # --------------------------------------------------------
+
+    sheet_kako = cari_sheet(
+        sheet_names,
+        SHEET_KAKO
+    )
+
+    if sheet_kako:
+
+        df_kako = flatten_excel_header(
+            file_bytes=file_bytes,
+            sheet_name=sheet_kako
+        )
+
+        hasil_sheet[
+            "Analisis Pusat by Kab"
+        ] = df_kako
+
+        log.append({
+            "Nama File": nama_file,
+            "Sheet": SHEET_KAKO,
+            "Status": "Berhasil",
+            "Baris": len(df_kako),
+            "Kolom": len(df_kako.columns),
+            "Keterangan": "Header berhasil di-flatten."
+        })
+
+    else:
+
+        log.append({
+            "Nama File": nama_file,
+            "Sheet": SHEET_KAKO,
+            "Status": "Tidak ditemukan",
+            "Baris": 0,
+            "Kolom": 0,
+            "Keterangan": (
+                "Sheet tidak ditemukan. "
+                f"Sheet tersedia: {sheet_names}"
+            )
+        })
+
+    # --------------------------------------------------------
+    # VALIDASI HASIL
+    # --------------------------------------------------------
+
+    if not hasil_sheet:
+
+        raise ValueError(
+            "Kedua sheet target tidak ditemukan. "
+            f"Sheet yang tersedia: {sheet_names}"
+        )
+
+    # Buat file Excel hasil flatten.
+    output_bytes = dataframe_to_excel(
+        hasil_sheet
+    )
+
+    nama_output = (
+        f"{Path(nama_file).stem}_Flatten_Header.xlsx"
+    )
+
+    return {
+        "nama_input": nama_file,
+        "nama_output": nama_output,
+        "data": output_bytes,
+        "log": log
+    }
+
+
+# ============================================================
+# 9. TAMPILKAN FILE YANG DIUPLOAD
+# ============================================================
+
+if uploaded_files:
+
+    st.subheader("File yang Diunggah")
+
+    daftar_file = []
+
+    for file in uploaded_files:
+
+        ukuran_mb = file.size / (1024 * 1024)
+
+        daftar_file.append({
+            "Nama File": file.name,
+            "Ukuran (MB)": round(ukuran_mb, 2),
+            "Status": (
+                "Siap diproses"
+                if ukuran_mb <= MAX_FILE_SIZE_MB
+                else "Melebihi batas ukuran"
+            )
+        })
+
+    st.dataframe(
+        pd.DataFrame(daftar_file),
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# ============================================================
+# 10. TOMBOL PEMROSESAN
+# ============================================================
+
+if st.button(
+    "Proses dan Flatten Header",
+    type="primary",
+    use_container_width=True,
+    disabled=not uploaded_files
+):
+
+    file_valid = [
+        file
+        for file in uploaded_files
+        if file.size <= MAX_FILE_SIZE_MB * 1024 * 1024
+    ]
+
+    file_terlalu_besar = [
+        file.name
+        for file in uploaded_files
+        if file.size > MAX_FILE_SIZE_MB * 1024 * 1024
+    ]
+
+    if file_terlalu_besar:
+
+        st.warning(
+            "File berikut melebihi batas ukuran: "
+            + ", ".join(file_terlalu_besar)
+        )
+
+    if not file_valid:
+
+        st.error(
+            "Tidak ada file yang memenuhi batas ukuran."
+        )
+
+    else:
+
+        hasil_berhasil = []
+
+        hasil_gagal = []
+
+        progress = st.progress(0)
+
+        status_text = st.empty()
+
+        for nomor, file in enumerate(
+            file_valid,
+            start=1
+        ):
+
+            status_text.write(
+                f"Memproses {nomor}/{len(file_valid)}: "
+                f"{file.name}"
+            )
+
+            try:
+
+                file_bytes = file.getvalue()
+
+                hasil = proses_satu_file(
+                    file_bytes=file_bytes,
+                    nama_file=file.name
+                )
+
+                hasil_berhasil.append(hasil)
+
+            except Exception as error:
+
+                hasil_gagal.append({
+                    "Nama File": file.name,
+                    "Jenis Error": type(error).__name__,
+                    "Detail Error": str(error)
+                })
+
+            progress.progress(
+                nomor / len(file_valid)
+            )
+
+        status_text.write(
+            "Pemrosesan selesai."
+        )
+
+        # Simpan hasil pemrosesan.
+        st.session_state["hasil_flatten"] = (
+            hasil_berhasil
+        )
+
+        st.session_state["hasil_flatten_gagal"] = (
+            hasil_gagal
+        )
+
+
+# ============================================================
+# 11. TAMPILKAN HASIL
+# ============================================================
+
+if "hasil_flatten" in st.session_state:
+
+    hasil_berhasil = st.session_state[
+        "hasil_flatten"
+    ]
+
+    hasil_gagal = st.session_state.get(
+        "hasil_flatten_gagal",
+        []
+    )
+
+    st.divider()
+
+    st.subheader("Hasil Tahap 1")
+
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric(
+        "File berhasil",
+        len(hasil_berhasil)
+    )
+
+    col2.metric(
+        "File gagal",
+        len(hasil_gagal)
+    )
+
+    col3.metric(
+        "Total file",
+        len(hasil_berhasil) + len(hasil_gagal)
+    )
+
+    # --------------------------------------------------------
+    # LAPORAN FLATTEN
+    # --------------------------------------------------------
+
+    if hasil_berhasil:
+
+        st.subheader("Laporan Flatten")
+
+        daftar_log = []
+
+        for hasil in hasil_berhasil:
+
+            daftar_log.extend(
+                hasil["log"]
+            )
+
+        st.dataframe(
+            pd.DataFrame(daftar_log),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # ----------------------------------------------------
+        # DOWNLOAD PER FILE
+        # ----------------------------------------------------
+
+        st.subheader("Download Hasil Excel")
+
+        for hasil in hasil_berhasil:
+
+            with st.container(border=True):
+
+                st.write(
+                    f"**{hasil['nama_output']}**"
+                )
+
+                st.download_button(
+                    label="Download Excel",
+                    data=hasil["data"],
+                    file_name=hasil["nama_output"],
+                    mime=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet"
+                    ),
+                    key=f"download_{hasil['nama_output']}",
+                    use_container_width=True
+                )
+
+        # ----------------------------------------------------
+        # DOWNLOAD ZIP
+        # ----------------------------------------------------
+
+        zip_buffer = BytesIO()
+
+        with zipfile.ZipFile(
+            zip_buffer,
+            mode="w",
+            compression=zipfile.ZIP_DEFLATED
+        ) as zip_file:
+
+            for hasil in hasil_berhasil:
+
+                zip_file.writestr(
+                    hasil["nama_output"],
+                    hasil["data"]
+                )
+
+        st.download_button(
+            label="Download Semua Hasil (ZIP)",
+            data=zip_buffer.getvalue(),
+            file_name="Hasil_Flatten_Header.zip",
+            mime="application/zip",
+            type="primary",
+            use_container_width=True
+        )
+
+    # --------------------------------------------------------
+    # LAPORAN ERROR
+    # --------------------------------------------------------
+
+    if hasil_gagal:
+
+        st.error(
+            "Ada file yang gagal diproses. "
+            "Periksa detail error di bawah."
+        )
+
+        st.dataframe(
+            pd.DataFrame(hasil_gagal),
+            use_container_width=True,
+            hide_index=True
+        )
+
+    elif hasil_berhasil:
+
+        st.success(
+            "Pemrosesan flatten selesai. "
+            "Silakan periksa dan unduh hasilnya."
+        )
+
+    # --------------------------------------------------------
+    # RESET
+    # --------------------------------------------------------
+
+    if st.button("Reset Hasil"):
+
+        st.session_state.pop(
+            "hasil_flatten",
+            None
+        )
+
+        st.session_state.pop(
+            "hasil_flatten_gagal",
+            None
+        )
+
+        st.rerun()
+
+
+# ============================================================
+# 12. INFORMASI TAHAP BERIKUTNYA
+# ============================================================
+
+st.divider()
+
+st.caption(
+    "Tahap berikutnya: boundary GeoJSON, matching wilayah, "
+    "validasi indikator, dan dashboard peta."
+)

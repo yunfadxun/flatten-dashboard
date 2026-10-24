@@ -783,10 +783,7 @@ def normalisasi_dasar(teks):
 
     teks = str(teks).strip().upper()
 
-    teks = unicodedata.normalize(
-        "NFKD",
-        teks
-    )
+    teks = unicodedata.normalize("NFKD", teks)
 
     teks = "".join(
         karakter
@@ -796,17 +793,8 @@ def normalisasi_dasar(teks):
 
     teks = teks.replace("&", " DAN ")
 
-    teks = re.sub(
-        r"[^A-Z0-9]+",
-        " ",
-        teks
-    )
-
-    teks = re.sub(
-        r"\s+",
-        " ",
-        teks
-    ).strip()
+    teks = re.sub(r"[^A-Z0-9]+", " ", teks)
+    teks = re.sub(r"\s+", " ", teks).strip()
 
     return teks
 
@@ -838,31 +826,63 @@ def normalisasi_kabupaten(teks):
 
     hasil = normalisasi_dasar(teks)
 
-    hasil = re.sub(
-        r"^KABUPATEN\s+",
-        "",
-        hasil
-    )
+    # --------------------------------------------------------
+    # Hapus awalan administratif yang umum
+    # --------------------------------------------------------
 
     hasil = re.sub(
-        r"^KAB\s+",
+        r"^(KABUPATEN|KAB)\s+",
         "",
         hasil
-    )
+    ).strip()
+
+    # --------------------------------------------------------
+    # Alias nama wilayah
+    # --------------------------------------------------------
 
     alias = {
-        "KOTA GUNUNG SITOLI": "KOTA GUNUNGSITOLI",
+        # Nama yang mengalami perubahan
+        "TOBA SAMOSIR": "TOBA",
+        "MALUKU TENGGARA BARAT": "KEPULAUAN TANIMBAR",
+        "MAMUJU UTARA": "PASANGKAYU",
+
+        # Variasi penulisan
+        "GUNUNG KIDUL": "GUNUNGKIDUL",
+        "PEMATANG SIANTAR": "PEMATANGSIANTAR",
+        "PADANG SIDEMPUAN": "PADANGSIDIMPUAN",
+        "PADANG SIDIMPUAN": "PADANGSIDIMPUAN",
         "DHARMAS RAYA": "DHARMASRAYA",
-        "KOTA PARE PARE": "KOTA PAREPARE",
+        "PARE PARE": "PAREPARE",
         "PANGKAJENE KEPULAUAN": "PANGKAJENE DAN KEPULAUAN",
         "SELAYAR": "KEPULAUAN SELAYAR",
-        "KOTA BAU BAU": "KOTA BAUBAU",
+        "BAU BAU": "BAUBAU",
         "YAPEN WAROPEN": "KEPULAUAN YAPEN",
         "POLIWALI MANDAR": "POLEWALI MANDAR",
         "TAMBRAW": "TAMBRAUW",
+
+        # Nama kabupaten/kota yang mengandung kata KOTA
+        # sebagai bagian dari nama wilayah
+        "KOTA BARU": "KOTABARU",
+        "KOTA BANJAR BARU": "BANJARBARU",
     }
 
-    return alias.get(hasil, hasil)
+    if hasil in alias:
+        hasil = alias[hasil]
+
+    else:
+        # Nama kota pada Excel biasanya memiliki awalan KOTA,
+        # sedangkan nama file boundary biasanya tidak.
+        if hasil.startswith("KOTA "):
+            hasil = hasil[5:].strip()
+
+        # Samakan penulisan dengan menghilangkan spasi.
+        hasil = hasil.replace(" ", "")
+
+    # Alias dapat menghasilkan nama dengan spasi.
+    # Samakan format akhirnya untuk semua nama.
+    hasil = hasil.replace(" ", "")
+
+    return hasil
 
 
 # ============================================================

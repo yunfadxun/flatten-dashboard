@@ -2,7 +2,6 @@
 # FLATTEN HEADER MULTIPLE XLSM
 # ============================================================
 
-!pip install -q pandas openpyxl
 
 import re
 import zipfile

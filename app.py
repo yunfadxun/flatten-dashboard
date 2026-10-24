@@ -727,35 +727,32 @@ def proses_file_excel(
     # --------------------------------------------------------
 
     return {
+    # Identitas file
+    "nama_file": nama_file,
+    "nama_input": nama_file,
 
-        # Format yang dipakai UI Tahap 1
-        "nama_file":
-            nama_file,
+    "nama_output": buat_nama_file_output(
+        nama_file
+    ),
 
-        "excel_bytes":
-            excel_bytes,
+    # Workbook Excel hasil flatten dalam bentuk bytes.
+    # Key ini dibaca oleh streamlit_tahap_2_3.py.
+    "data": excel_bytes,
 
-        "data":
-            hasil_sheet,
+    # Digunakan untuk download di Tahap 1.
+    "excel_bytes": excel_bytes,
 
-        "sheet_berhasil":
-            sheet_berhasil,
+    # DataFrame untuk ringkasan dan preview Tahap 1.
+    "dataframe": hasil_sheet,
 
-        "sheet_tidak_ditemukan":
-            sheet_tidak_ditemukan,
+    # Informasi pemrosesan.
+    "sheet_berhasil": sheet_berhasil,
 
-        # Format yang dibaca module Tahap 2–3
-        "nama_input":
-            nama_file,
+    "sheet_tidak_ditemukan":
+        sheet_tidak_ditemukan,
 
-        "nama_output":
-            buat_nama_file_output(
-                nama_file
-            ),
-
-        "log":
-            log,
-    }
+    "log": log,
+}
 
 
 # ============================================================

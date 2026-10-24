@@ -699,89 +699,182 @@ def pisahkan_nama_boundary_kabupaten(nama_file):
     return "", nama.replace("_", " ")
 
 
-def baca_daftar_boundary(boundary_zip_bytes):
+def baca_daftar_boundary(daftar_file_boundary):
     """
-    Baca daftar GeoJSON dalam ZIP tanpa mengekstrak file ke disk.
+    Membaca boundary dari:
+    - Satu file GeoJSON
+    - Beberapa file GeoJSON
+    - Satu atau beberapa file ZIP berisi GeoJSON
+
+    Format input:
+    [
+        {"name": "ACEH.geojson", "data": bytes},
+        {"name": "boundary.zip", "data": bytes}
+    ]
     """
+
     daftar_provinsi = []
     daftar_kabupaten = []
     tidak_teridentifikasi = []
 
-    with zipfile.ZipFile(
-        BytesIO(boundary_zip_bytes),
-        mode="r"
-    ) as zip_file:
+    daftar_geojson = []
 
-        anggota = [
-            nama
-            for nama in zip_file.namelist()
-            if not nama.endswith("/")
-            and nama.lower().endswith(
-                (".geojson", ".json")
-            )
-            and "__macosx" not in nama.lower()
-        ]
+    # --------------------------------------------------------
+    # 1. BACA FILE GEOJSON DAN ZIP
+    # --------------------------------------------------------
 
-        if not anggota:
-            raise ValueError(
-                "ZIP tidak berisi file .geojson atau .json."
-            )
+    for file_item in daftar_file_boundary:
 
-        for path in anggota:
-            level = identifikasi_level_boundary(path)
+        nama_file = file_item["name"]
+        file_bytes = file_item["data"]
 
-            if level == "provinsi":
-                nama = nama_tanpa_extension(path)
+        if nama_file.lower().endswith(".zip"):
 
-                nama = re.sub(
-                    r"^(ADM1[_\-\s]*)",
-                    "",
-                    nama,
-                    flags=re.IGNORECASE
-                )
+            try:
+                with zipfile.ZipFile(
+                    BytesIO(file_bytes),
+                    mode="r"
+                ) as zip_file:
 
-                nama = nama.replace("_", " ")
-
-                daftar_provinsi.append({
-                    "Path": path,
-                    "Nama Boundary": nama,
-                    "Key Provinsi":
-                        normalisasi_provinsi(nama)
-                })
-
-            elif level == "kabupaten":
-                provinsi, kabupaten = (
-                    pisahkan_nama_boundary_kabupaten(path)
-                )
-
-                daftar_kabupaten.append({
-                    "Path": path,
-                    "Provinsi Boundary": provinsi,
-                    "Kabupaten/Kota Boundary": kabupaten,
-                    "Key Provinsi":
-                        normalisasi_provinsi(provinsi),
-                    "Key Kabupaten":
-                        normalisasi_kabupaten(kabupaten),
-                    "Key Gabungan":
-                        buat_key_kabupaten(
-                            provinsi,
-                            kabupaten
+                    anggota = [
+                        nama
+                        for nama in zip_file.namelist()
+                        if not nama.endswith("/")
+                        and nama.lower().endswith(
+                            (".geojson", ".json")
                         )
-                })
+                        and "__macosx" not in nama.lower()
+                    ]
 
-            else:
-                tidak_teridentifikasi.append({
-                    "Path": path,
-                    "Keterangan": (
-                        "Level boundary tidak dapat ditentukan "
-                        "dari nama folder atau filename."
-                    )
-                })
+                    for path in anggota:
+                        daftar_geojson.append({
+                            "Path": path,
+                            "Nama File": nama_tanpa_extension(path),
+                        })
+
+            except zipfile.BadZipFile:
+                raise ValueError(
+                    f"File '{nama_file}' bukan ZIP yang valid."
+                )
+
+        elif nama_file.lower().endswith(
+            (".geojson", ".json")
+        ):
+
+            daftar_geojson.append({
+                "Path": nama_file,
+                "Nama File": nama_tanpa_extension(nama_file),
+            })
+
+        else:
+            tidak_teridentifikasi.append({
+                "Path": nama_file,
+                "Keterangan": "Format file tidak didukung.",
+            })
+
+    # --------------------------------------------------------
+    # 2. IDENTIFIKASI LEVEL BOUNDARY
+    # --------------------------------------------------------
+
+    for item in daftar_geojson:
+
+        path = item["Path"]
+        nama = item["Nama File"]
+
+        level = identifikasi_level_boundary(path)
+
+        if level is None:
+            level = identifikasi_level_boundary(nama)
+
+        if level == "provinsi":
+
+            nama_provinsi = re.sub(
+                r"^ADM1[_\-\s]*",
+                "",
+                nama,
+                flags=re.IGNORECASE
+            ).replace("_", " ")
+
+            daftar_provinsi.append({
+                "Path": path,
+                "Nama Boundary": nama_provinsi,
+                "Key Provinsi": normalisasi_provinsi(
+                    nama_provinsi
+                ),
+            })
+
+        elif level == "kabupaten":
+
+            provinsi, kabupaten = (
+                pisahkan_nama_boundary_kabupaten(path)
+            )
+
+            # Jika filename langsung tidak memuat path folder,
+            # gunakan nama file untuk memisahkan nama wilayah.
+            if not kabupaten:
+                provinsi, kabupaten = (
+                    pisahkan_nama_boundary_kabupaten(nama)
+                )
+
+            daftar_kabupaten.append({
+                "Path": path,
+                "Provinsi Boundary": provinsi,
+                "Kabupaten/Kota Boundary": kabupaten,
+                "Key Provinsi": normalisasi_provinsi(provinsi),
+                "Key Kabupaten": normalisasi_kabupaten(kabupaten),
+                "Key Gabungan": buat_key_kabupaten(
+                    provinsi,
+                    kabupaten
+                ),
+            })
+
+        else:
+            tidak_teridentifikasi.append({
+                "Path": path,
+                "Keterangan": (
+                    "Level boundary tidak dikenali. "
+                    "Nama file atau folder harus mengandung "
+                    "ADM1/provinsi atau ADM2/kabupaten/district."
+                ),
+            })
+
+    # --------------------------------------------------------
+    # 3. HASIL DATAFRAME
+    # --------------------------------------------------------
+
+    df_provinsi = pd.DataFrame(
+        daftar_provinsi,
+        columns=[
+            "Path",
+            "Nama Boundary",
+            "Key Provinsi",
+        ]
+    )
+
+    df_kabupaten = pd.DataFrame(
+        daftar_kabupaten,
+        columns=[
+            "Path",
+            "Provinsi Boundary",
+            "Kabupaten/Kota Boundary",
+            "Key Provinsi",
+            "Key Kabupaten",
+            "Key Gabungan",
+        ]
+    )
+
+    df_tidak_teridentifikasi = pd.DataFrame(
+        tidak_teridentifikasi,
+        columns=[
+            "Path",
+            "Keterangan",
+        ]
+    )
 
     return (
-        pd.DataFrame(daftar_provinsi),
-        pd.DataFrame(daftar_kabupaten),
-        pd.DataFrame(tidak_teridentifikasi)
+        df_provinsi,
+        df_kabupaten,
+        df_tidak_teridentifikasi
     )
 
 

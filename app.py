@@ -772,54 +772,170 @@ else:
     st.sidebar.info("Tahap 1: Belum ada hasil")
 
 
-# ============================================================
-# 2. NORMALISASI NAMA WILAYAH
-# ============================================================
+def normalisasi_kabupaten(teks):
 
-def normalisasi_dasar(teks):
-
-    if pd.isna(teks):
-        return ""
-
-    teks = str(teks).strip().upper()
-
-    teks = unicodedata.normalize("NFKD", teks)
-
-    teks = "".join(
-        karakter
-        for karakter in teks
-        if not unicodedata.combining(karakter)
-    )
-
-    teks = teks.replace("&", " DAN ")
-
-    teks = re.sub(r"[^A-Z0-9]+", " ", teks)
-    teks = re.sub(r"\s+", " ", teks).strip()
-
-    return teks
-
-
-def normalisasi_provinsi(teks):
+    # ========================================================
+    # 1. NORMALISASI DASAR
+    # ========================================================
 
     hasil = normalisasi_dasar(teks)
 
+    if not hasil:
+        return ""
+
+    # ========================================================
+    # 2. HAPUS AWALAN ADMINISTRATIF KABUPATEN
+    # ========================================================
+
+    hasil = re.sub(
+        r"^(KABUPATEN|KAB)\s+",
+        "",
+        hasil
+    ).strip()
+
+    # ========================================================
+    # 3. ALIAS NAMA KABUPATEN/KOTA
+    # ========================================================
+
     alias = {
-        "JAKARTA": "DKI JAKARTA",
-        "DK JAKARTA": "DKI JAKARTA",
-        "DAERAH KHUSUS IBUKOTA JAKARTA": "DKI JAKARTA",
 
-        "YOGYAKARTA": "DAERAH ISTIMEWA YOGYAKARTA",
-        "DI YOGYAKARTA": "DAERAH ISTIMEWA YOGYAKARTA",
-        "D I YOGYAKARTA": "DAERAH ISTIMEWA YOGYAKARTA",
+        # ----------------------------------------------------
+        # NAMA WILAYAH YANG BERUBAH
+        # ----------------------------------------------------
 
-        "BANGKA BELITUNG": "KEPULAUAN BANGKA BELITUNG",
-        "KEP BANGKA BELITUNG": "KEPULAUAN BANGKA BELITUNG",
+        "TOBA SAMOSIR": "TOBA",
 
-        "KEP RIAU": "KEPULAUAN RIAU",
-        "NANGGROE ACEH DARUSSALAM": "ACEH",
+        "MALUKU TENGGARA BARAT":
+            "KEPULAUAN TANIMBAR",
+
+        "MAMUJU UTARA":
+            "PASANGKAYU",
+
+        # ----------------------------------------------------
+        # VARIASI PENULISAN NAMA
+        # ----------------------------------------------------
+
+        "GUNUNG KIDUL":
+            "GUNUNGKIDUL",
+
+        "PEMATANG SIANTAR":
+            "PEMATANGSIANTAR",
+
+        "PADANG SIDEMPUAN":
+            "PADANGSIDIMPUAN",
+
+        "PADANG SIDIMPUAN":
+            "PADANGSIDIMPUAN",
+
+        "DHARMAS RAYA":
+            "DHARMASRAYA",
+
+        "PARE PARE":
+            "PAREPARE",
+
+        "PANGKAJENE KEPULAUAN":
+            "PANGKAJENE DAN KEPULAUAN",
+
+        "SELAYAR":
+            "KEPULAUAN SELAYAR",
+
+        "BAU BAU":
+            "BAUBAU",
+
+        "YAPEN WAROPEN":
+            "KEPULAUAN YAPEN",
+
+        "POLIWALI MANDAR":
+            "POLEWALI MANDAR",
+
+        "TAMBRAW":
+            "TAMBRAUW",
+
+        # ----------------------------------------------------
+        # KOTA DENGAN VARIASI PENULISAN
+        # ----------------------------------------------------
+
+        "KOTA GUNUNG SITOLI":
+            "GUNUNGSITOLI",
+
+        "KOTA PARE PARE":
+            "PAREPARE",
+
+        "KOTA BAU BAU":
+            "BAUBAU",
+
+        "KOTA PADANGSIDEMPUAN":
+            "PADANGSIDIMPUAN",
+
+        "KOTA PADANG SIDEMPUAN":
+            "PADANGSIDIMPUAN",
+
+        "KOTA PEMATANG SIANTAR":
+            "PEMATANGSIANTAR",
+
+        "KOTA BANJAR BARU":
+            "BANJARBARU",
+
+        "KOTA BARU":
+            "KOTABARU",
+
+        # ----------------------------------------------------
+        # DKI JAKARTA
+        # ----------------------------------------------------
+
+        "KOTA JAKARTA PUSAT":
+            "JAKARTAPUSAT",
+
+        "KOTA JAKARTA UTARA":
+            "JAKARTAUTARA",
+
+        "KOTA JAKARTA BARAT":
+            "JAKARTABARAT",
+
+        "KOTA JAKARTA SELATAN":
+            "JAKARTASELATAN",
+
+        "KOTA JAKARTA TIMUR":
+            "JAKARTATIMUR",
+
+        "KEPULAUAN SERIBU":
+            "KEPULAUANSERIBU",
+
+        # ----------------------------------------------------
+        # SULAWESI UTARA
+        # ----------------------------------------------------
+
+        "SIAU TAGULANDANG BIARO":
+            "SIAUTAGULANDANGBIARO",
+
     }
 
-    return alias.get(hasil, hasil)
+    # ========================================================
+    # 4. TERAPKAN ALIAS
+    # ========================================================
+
+    if hasil in alias:
+
+        hasil = alias[hasil]
+
+    else:
+
+        # Hapus awalan KOTA untuk nama kota yang tidak
+        # memiliki alias khusus.
+        if hasil.startswith("KOTA "):
+
+            hasil = hasil[5:].strip()
+
+    # ========================================================
+    # 5. SAMAKAN FORMAT AKHIR
+    # ========================================================
+
+    # Hilangkan spasi agar perbedaan format nama tidak
+    # menyebabkan ketidakcocokan.
+
+    hasil = hasil.replace(" ", "")
+
+    return hasil
 
 
 def normalisasi_kabupaten(teks):

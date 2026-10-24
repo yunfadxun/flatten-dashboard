@@ -770,7 +770,45 @@ if tahap_selesai:
     st.sidebar.success("Tahap 1: Hasil tersedia")
 else:
     st.sidebar.info("Tahap 1: Belum ada hasil")
+# ============================================================
+# NORMALISASI NAMA PROVINSI
+# ============================================================
 
+def normalisasi_provinsi(teks):
+
+    hasil = normalisasi_dasar(teks)
+
+    if not hasil:
+        return ""
+
+    alias = {
+        "JAKARTA": "DKI JAKARTA",
+        "DK JAKARTA": "DKI JAKARTA",
+        "DKI JAKARTA": "DKI JAKARTA",
+        "DAERAH KHUSUS IBUKOTA JAKARTA": "DKI JAKARTA",
+
+        "YOGYAKARTA": "DAERAH ISTIMEWA YOGYAKARTA",
+        "DI YOGYAKARTA": "DAERAH ISTIMEWA YOGYAKARTA",
+        "D I YOGYAKARTA": "DAERAH ISTIMEWA YOGYAKARTA",
+        "DAERAH ISTIMEWA YOGYAKARTA":
+            "DAERAH ISTIMEWA YOGYAKARTA",
+
+        "BANGKA BELITUNG": "KEPULAUAN BANGKA BELITUNG",
+        "KEP BANGKA BELITUNG": "KEPULAUAN BANGKA BELITUNG",
+        "KEPULAUAN BANGKA BELITUNG":
+            "KEPULAUAN BANGKA BELITUNG",
+
+        "KEP RIAU": "KEPULAUAN RIAU",
+        "KEPULAUAN RIAU": "KEPULAUAN RIAU",
+
+        "NANGGROE ACEH DARUSSALAM": "ACEH",
+
+        "SUMATERA SELATAN": "SUMATERA SELATAN",
+        "SUMATERA UTARA": "SUMATERA UTARA",
+        "SUMATERA BARAT": "SUMATERA BARAT",
+    }
+
+    return alias.get(hasil, hasil)
 
 def normalisasi_kabupaten(teks):
 
@@ -937,139 +975,6 @@ def normalisasi_kabupaten(teks):
 
     return hasil
 
-
-def normalisasi_kabupaten(teks):
-
-    hasil = normalisasi_dasar(teks)
-
-    # --------------------------------------------------------
-    # Hapus awalan administratif yang umum
-    # --------------------------------------------------------
-
-    hasil = re.sub(
-        r"^(KABUPATEN|KAB)\s+",
-        "",
-        hasil
-    ).strip()
-
-    # --------------------------------------------------------
-    # Alias nama wilayah
-    # --------------------------------------------------------
-
-    alias = {
-        # Nama yang mengalami perubahan
-        "TOBA SAMOSIR": "TOBA",
-        "MALUKU TENGGARA BARAT": "KEPULAUAN TANIMBAR",
-        "MAMUJU UTARA": "PASANGKAYU",
-
-        # Variasi penulisan
-        "GUNUNG KIDUL": "GUNUNGKIDUL",
-        "PEMATANG SIANTAR": "PEMATANGSIANTAR",
-        "PADANG SIDEMPUAN": "PADANGSIDIMPUAN",
-        "PADANG SIDIMPUAN": "PADANGSIDIMPUAN",
-        "DHARMAS RAYA": "DHARMASRAYA",
-        "PARE PARE": "PAREPARE",
-        "PANGKAJENE KEPULAUAN": "PANGKAJENE DAN KEPULAUAN",
-        "SELAYAR": "KEPULAUAN SELAYAR",
-        "BAU BAU": "BAUBAU",
-        "YAPEN WAROPEN": "KEPULAUAN YAPEN",
-        "POLIWALI MANDAR": "POLEWALI MANDAR",
-        "TAMBRAW": "TAMBRAUW",
-
-        # Nama kabupaten/kota yang mengandung kata KOTA
-        # sebagai bagian dari nama wilayah
-        "KOTA BARU": "KOTABARU",
-        "KOTA BANJAR BARU": "BANJARBARU",
-    }
-
-    if hasil in alias:
-        hasil = alias[hasil]
-
-    else:
-        # Nama kota pada Excel biasanya memiliki awalan KOTA,
-        # sedangkan nama file boundary biasanya tidak.
-        if hasil.startswith("KOTA "):
-            hasil = hasil[5:].strip()
-
-        # Samakan penulisan dengan menghilangkan spasi.
-        hasil = hasil.replace(" ", "")
-
-    # Alias dapat menghasilkan nama dengan spasi.
-    # Samakan format akhirnya untuk semua nama.
-    hasil = hasil.replace(" ", "")
-
-    return hasil
-
-
-# ============================================================
-# 3. AMBIL DAFTAR BOUNDARY DARI GITHUB
-# ============================================================
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def ambil_daftar_boundary():
-
-    url = (
-        "https://api.github.com/repos/"
-        "dmxsan/indonesia-admin-boundaries/"
-        "git/trees/main?recursive=1"
-    )
-
-    request = Request(
-        url,
-        headers={
-            "User-Agent": "Streamlit-Surveilans-MR"
-        }
-    )
-
-    with urlopen(request, timeout=60) as response:
-        data = json.loads(
-            response.read().decode("utf-8")
-        )
-
-    if data.get("truncated"):
-        raise RuntimeError(
-            "Daftar file GitHub terpotong. "
-            "Daftar boundary belum dapat divalidasi."
-        )
-
-    files = [
-        item["path"]
-        for item in data.get("tree", [])
-        if item.get("type") == "blob"
-        and item["path"].lower().endswith(".geojson")
-    ]
-
-    prefix_provinsi = (
-        "processed-data/02-provinces/province-only/"
-    )
-
-    prefix_kabupaten = (
-        "processed-data/03-districts/"
-    )
-
-    files_provinsi = [
-        path
-        for path in files
-        if path.startswith(prefix_provinsi)
-    ]
-
-    files_kabupaten = [
-        path
-        for path in files
-        if path.startswith(prefix_kabupaten)
-    ]
-
-    if not files_provinsi:
-        raise ValueError(
-            "File boundary provinsi tidak ditemukan."
-        )
-
-    if not files_kabupaten:
-        raise ValueError(
-            "File boundary kabupaten/kota tidak ditemukan."
-        )
-
-    return files_provinsi, files_kabupaten
 
 
 # ============================================================

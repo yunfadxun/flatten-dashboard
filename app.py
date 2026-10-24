@@ -724,3 +724,684 @@ st.caption(
     "Tahap berikutnya: boundary GeoJSON, matching wilayah, "
     "validasi indikator, dan dashboard peta."
 )
+
+
+# ============================================================
+# SIDEBAR NAVIGATION + TAHAP 2
+# ============================================================
+
+import json
+import re
+import unicodedata
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
+
+
+# ============================================================
+# 1. NAVIGASI TAHAP
+# ============================================================
+
+st.sidebar.title("Surveilans MR")
+
+st.sidebar.caption(
+    "Pengolahan data dan dashboard peta"
+)
+
+TAHAP = st.sidebar.radio(
+    "NAVIGASI TAHAP",
+    [
+        "1. Upload & Flatten",
+        "2. Boundary & Matching",
+        "3. Validasi Indikator",
+        "4. Dashboard Peta",
+        "5. Ekspor Hasil",
+    ],
+    key="navigasi_tahap"
+)
+
+st.sidebar.divider()
+
+tahap_selesai = (
+    "hasil_flatten" in st.session_state
+    and len(st.session_state["hasil_flatten"]) > 0
+)
+
+if tahap_selesai:
+    st.sidebar.success("Tahap 1: Hasil tersedia")
+else:
+    st.sidebar.info("Tahap 1: Belum ada hasil")
+
+
+# ============================================================
+# 2. NORMALISASI NAMA WILAYAH
+# ============================================================
+
+def normalisasi_dasar(teks):
+
+    if pd.isna(teks):
+        return ""
+
+    teks = str(teks).strip().upper()
+
+    teks = unicodedata.normalize(
+        "NFKD",
+        teks
+    )
+
+    teks = "".join(
+        karakter
+        for karakter in teks
+        if not unicodedata.combining(karakter)
+    )
+
+    teks = teks.replace("&", " DAN ")
+
+    teks = re.sub(
+        r"[^A-Z0-9]+",
+        " ",
+        teks
+    )
+
+    teks = re.sub(
+        r"\s+",
+        " ",
+        teks
+    ).strip()
+
+    return teks
+
+
+def normalisasi_provinsi(teks):
+
+    hasil = normalisasi_dasar(teks)
+
+    alias = {
+        "JAKARTA": "DKI JAKARTA",
+        "DK JAKARTA": "DKI JAKARTA",
+        "DAERAH KHUSUS IBUKOTA JAKARTA": "DKI JAKARTA",
+
+        "YOGYAKARTA": "DAERAH ISTIMEWA YOGYAKARTA",
+        "DI YOGYAKARTA": "DAERAH ISTIMEWA YOGYAKARTA",
+        "D I YOGYAKARTA": "DAERAH ISTIMEWA YOGYAKARTA",
+
+        "BANGKA BELITUNG": "KEPULAUAN BANGKA BELITUNG",
+        "KEP BANGKA BELITUNG": "KEPULAUAN BANGKA BELITUNG",
+
+        "KEP RIAU": "KEPULAUAN RIAU",
+        "NANGGROE ACEH DARUSSALAM": "ACEH",
+    }
+
+    return alias.get(hasil, hasil)
+
+
+def normalisasi_kabupaten(teks):
+
+    hasil = normalisasi_dasar(teks)
+
+    hasil = re.sub(
+        r"^KABUPATEN\s+",
+        "",
+        hasil
+    )
+
+    hasil = re.sub(
+        r"^KAB\s+",
+        "",
+        hasil
+    )
+
+    alias = {
+        "KOTA GUNUNG SITOLI": "KOTA GUNUNGSITOLI",
+        "DHARMAS RAYA": "DHARMASRAYA",
+        "KOTA PARE PARE": "KOTA PAREPARE",
+        "PANGKAJENE KEPULAUAN": "PANGKAJENE DAN KEPULAUAN",
+        "SELAYAR": "KEPULAUAN SELAYAR",
+        "KOTA BAU BAU": "KOTA BAUBAU",
+        "YAPEN WAROPEN": "KEPULAUAN YAPEN",
+        "POLIWALI MANDAR": "POLEWALI MANDAR",
+        "TAMBRAW": "TAMBRAUW",
+    }
+
+    return alias.get(hasil, hasil)
+
+
+# ============================================================
+# 3. AMBIL DAFTAR BOUNDARY DARI GITHUB
+# ============================================================
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def ambil_daftar_boundary():
+
+    url = (
+        "https://api.github.com/repos/"
+        "dmxsan/indonesia-admin-boundaries/"
+        "git/trees/main?recursive=1"
+    )
+
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Streamlit-Surveilans-MR"
+        }
+    )
+
+    with urlopen(request, timeout=60) as response:
+        data = json.loads(
+            response.read().decode("utf-8")
+        )
+
+    if data.get("truncated"):
+        raise RuntimeError(
+            "Daftar file GitHub terpotong. "
+            "Daftar boundary belum dapat divalidasi."
+        )
+
+    files = [
+        item["path"]
+        for item in data.get("tree", [])
+        if item.get("type") == "blob"
+        and item["path"].lower().endswith(".geojson")
+    ]
+
+    prefix_provinsi = (
+        "processed-data/02-provinces/province-only/"
+    )
+
+    prefix_kabupaten = (
+        "processed-data/03-districts/"
+    )
+
+    files_provinsi = [
+        path
+        for path in files
+        if path.startswith(prefix_provinsi)
+    ]
+
+    files_kabupaten = [
+        path
+        for path in files
+        if path.startswith(prefix_kabupaten)
+    ]
+
+    if not files_provinsi:
+        raise ValueError(
+            "File boundary provinsi tidak ditemukan."
+        )
+
+    if not files_kabupaten:
+        raise ValueError(
+            "File boundary kabupaten/kota tidak ditemukan."
+        )
+
+    return files_provinsi, files_kabupaten
+
+
+# ============================================================
+# 4. IDENTIFIKASI KOLOM EXCEL
+# ============================================================
+
+def cari_kolom(df, nama_target):
+
+    def norm_kolom(teks):
+        return re.sub(
+            r"[^a-z0-9]",
+            "",
+            str(teks).lower()
+        )
+
+    target = norm_kolom(nama_target)
+
+    # Prioritaskan kecocokan persis.
+    for kolom in df.columns:
+
+        if norm_kolom(kolom) == target:
+            return kolom
+
+    # Jika nama header memiliki awalan tambahan.
+    for kolom in df.columns:
+
+        if target in norm_kolom(kolom):
+            return kolom
+
+    return None
+
+
+# ============================================================
+# 5. PROSES MATCHING
+# ============================================================
+
+def buat_laporan_matching(
+    hasil_flatten,
+    files_provinsi,
+    files_kabupaten
+):
+
+    boundary_provinsi = {
+        normalisasi_provinsi(
+            path.split("/")[-1]
+            .removesuffix(".geojson")
+            .replace("_", " ")
+        )
+        for path in files_provinsi
+    }
+
+    boundary_kabupaten = {
+        normalisasi_kabupaten(
+            path.split("/")[-1]
+            .removesuffix(".geojson")
+            .replace("_", " ")
+        )
+        for path in files_kabupaten
+    }
+
+    laporan_provinsi = []
+    laporan_kabupaten = []
+    laporan_file = []
+
+    for hasil in hasil_flatten:
+
+        nama_file = hasil["nama_input"]
+
+        excel_bytes = hasil["data"]
+
+        try:
+
+            excel = pd.ExcelFile(
+                BytesIO(excel_bytes),
+                engine="openpyxl"
+            )
+
+        except Exception as error:
+
+            laporan_file.append({
+                "Nama File": nama_file,
+                "Status": "Gagal membaca hasil flatten",
+                "Keterangan": str(error)
+            })
+
+            continue
+
+        # ----------------------------------------------------
+        # MATCHING PROVINSI
+        # ----------------------------------------------------
+
+        if "Tabel Analisis" in excel.sheet_names:
+
+            df_prov = pd.read_excel(
+                BytesIO(excel_bytes),
+                sheet_name="Tabel Analisis",
+                engine="openpyxl"
+            )
+
+            kolom_prov = cari_kolom(
+                df_prov,
+                "Kabupaten / Kota / Provinsi"
+            )
+
+            if kolom_prov is None:
+
+                laporan_file.append({
+                    "Nama File": nama_file,
+                    "Status": "Kolom provinsi tidak ditemukan",
+                    "Keterangan": (
+                        "Periksa header Tabel Analisis."
+                    )
+                })
+
+            else:
+
+                nilai_prov = (
+                    df_prov[kolom_prov]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                    .unique()
+                )
+
+                for nama in nilai_prov:
+
+                    key = normalisasi_provinsi(nama)
+
+                    if key in ("", "INDONESIA"):
+                        continue
+
+                    laporan_provinsi.append({
+                        "Nama File": nama_file,
+                        "Nama Provinsi Excel": nama,
+                        "Nama Normalisasi": key,
+                        "Status": (
+                            "Cocok"
+                            if key in boundary_provinsi
+                            else "Tidak cocok"
+                        )
+                    })
+
+        # ----------------------------------------------------
+        # MATCHING KABUPATEN/KOTA
+        # ----------------------------------------------------
+
+        if "Analisis Pusat by Kab" in excel.sheet_names:
+
+            df_kab = pd.read_excel(
+                BytesIO(excel_bytes),
+                sheet_name="Analisis Pusat by Kab",
+                engine="openpyxl"
+            )
+
+            kolom_kab = cari_kolom(
+                df_kab,
+                "Kabupaten / Kota"
+            )
+
+            kolom_prov_kab = cari_kolom(
+                df_kab,
+                "Provinsi"
+            )
+
+            if kolom_kab is None:
+
+                laporan_file.append({
+                    "Nama File": nama_file,
+                    "Status": "Kolom kabupaten/kota tidak ditemukan",
+                    "Keterangan": (
+                        "Periksa header Analisis Pusat by Kab."
+                    )
+                })
+
+            else:
+
+                kolom_yang_dibutuhkan = [kolom_kab]
+
+                if kolom_prov_kab:
+                    kolom_yang_dibutuhkan.append(
+                        kolom_prov_kab
+                    )
+
+                df_nama = (
+                    df_kab[kolom_yang_dibutuhkan]
+                    .dropna(subset=[kolom_kab])
+                    .drop_duplicates()
+                )
+
+                for _, row in df_nama.iterrows():
+
+                    nama_kab = str(row[kolom_kab]).strip()
+
+                    nama_prov = (
+                        str(row[kolom_prov_kab]).strip()
+                        if kolom_prov_kab
+                        and pd.notna(row[kolom_prov_kab])
+                        else ""
+                    )
+
+                    key_kab = normalisasi_kabupaten(
+                        nama_kab
+                    )
+
+                    if key_kab in ("", "INDONESIA"):
+                        continue
+
+                    laporan_kabupaten.append({
+                        "Nama File": nama_file,
+                        "Provinsi Excel": nama_prov,
+                        "Kabupaten/Kota Excel": nama_kab,
+                        "Nama Normalisasi": key_kab,
+                        "Status Nama Boundary": (
+                            "Cocok"
+                            if key_kab in boundary_kabupaten
+                            else "Tidak cocok"
+                        )
+                    })
+
+    return (
+        laporan_provinsi,
+        laporan_kabupaten,
+        laporan_file,
+        len(files_provinsi),
+        len(files_kabupaten)
+    )
+
+
+# ============================================================
+# 6. TAMPILKAN HALAMAN TAHAP 2
+# ============================================================
+
+if TAHAP == "2. Boundary & Matching":
+
+    st.title("Tahap 2 — Boundary & Matching")
+
+    st.write(
+        "Tahap ini mengambil daftar GeoJSON dari repository "
+        "boundary Indonesia dan mencocokkan nama wilayah "
+        "dengan hasil flatten Tahap 1."
+    )
+
+    if not tahap_selesai:
+
+        st.warning(
+            "Hasil Tahap 1 belum tersedia pada sesi ini. "
+            "Silakan buka Tahap 1 dan jalankan flatten terlebih dahulu."
+        )
+
+        st.stop()
+
+    st.info(
+        "Tahap ini memeriksa kecocokan nama berdasarkan daftar file "
+        "boundary. Geometri belum diunduh atau diproses pada tahap ini."
+    )
+
+    if st.button(
+        "Jalankan Boundary & Matching",
+        type="primary",
+        use_container_width=True
+    ):
+
+        try:
+
+            with st.spinner(
+                "Mengambil daftar boundary dari GitHub..."
+            ):
+
+                (
+                    files_provinsi,
+                    files_kabupaten
+                ) = ambil_daftar_boundary()
+
+            st.success(
+                "Daftar boundary berhasil diambil."
+            )
+
+            with st.spinner(
+                "Mencocokkan nama wilayah..."
+            ):
+
+                (
+                    laporan_provinsi,
+                    laporan_kabupaten,
+                    laporan_file,
+                    jumlah_boundary_provinsi,
+                    jumlah_boundary_kabupaten
+                ) = buat_laporan_matching(
+                    st.session_state["hasil_flatten"],
+                    files_provinsi,
+                    files_kabupaten
+                )
+
+            st.session_state["hasil_matching"] = {
+                "provinsi": laporan_provinsi,
+                "kabupaten": laporan_kabupaten,
+                "file": laporan_file,
+                "jumlah_boundary_provinsi": jumlah_boundary_provinsi,
+                "jumlah_boundary_kabupaten": jumlah_boundary_kabupaten,
+            }
+
+        except (HTTPError, URLError, TimeoutError) as error:
+
+            st.error(
+                "Tidak dapat mengambil daftar boundary dari GitHub."
+            )
+
+            st.code(str(error))
+
+        except Exception as error:
+
+            st.error("Tahap 2 gagal dijalankan.")
+
+            st.exception(error)
+
+    # --------------------------------------------------------
+    # TAMPILKAN HASIL MATCHING
+    # --------------------------------------------------------
+
+    if "hasil_matching" in st.session_state:
+
+        hasil = st.session_state["hasil_matching"]
+
+        provinsi = pd.DataFrame(hasil["provinsi"])
+
+        kabupaten = pd.DataFrame(hasil["kabupaten"])
+
+        file_error = pd.DataFrame(hasil["file"])
+
+        st.divider()
+
+        st.subheader("Ringkasan Boundary")
+
+        col1, col2 = st.columns(2)
+
+        col1.metric(
+            "File boundary provinsi",
+            hasil["jumlah_boundary_provinsi"]
+        )
+
+        col2.metric(
+            "File boundary kabupaten/kota",
+            hasil["jumlah_boundary_kabupaten"]
+        )
+
+        if not provinsi.empty:
+
+            cocok = (
+                provinsi["Status"] == "Cocok"
+            ).sum()
+
+            tidak_cocok = (
+                provinsi["Status"] == "Tidak cocok"
+            ).sum()
+
+            st.subheader("Matching Provinsi")
+
+            col1, col2 = st.columns(2)
+
+            col1.metric("Cocok", int(cocok))
+
+            col2.metric("Tidak cocok", int(tidak_cocok))
+
+            st.dataframe(
+                provinsi,
+                use_container_width=True,
+                hide_index=True
+            )
+
+        if not kabupaten.empty:
+
+            cocok = (
+                kabupaten["Status Nama Boundary"] == "Cocok"
+            ).sum()
+
+            tidak_cocok = (
+                kabupaten["Status Nama Boundary"] == "Tidak cocok"
+            ).sum()
+
+            st.subheader("Matching Kabupaten/Kota")
+
+            col1, col2 = st.columns(2)
+
+            col1.metric("Cocok", int(cocok))
+
+            col2.metric("Tidak cocok", int(tidak_cocok))
+
+            st.dataframe(
+                kabupaten,
+                use_container_width=True,
+                hide_index=True
+            )
+
+        if not file_error.empty:
+
+            st.subheader("Peringatan Pembacaan File")
+
+            st.dataframe(
+                file_error,
+                use_container_width=True,
+                hide_index=True
+            )
+
+        # ----------------------------------------------------
+        # DOWNLOAD LAPORAN MATCHING
+        # ----------------------------------------------------
+
+        output = BytesIO()
+
+        with pd.ExcelWriter(
+            output,
+            engine="openpyxl"
+        ) as writer:
+
+            provinsi.to_excel(
+                writer,
+                sheet_name="Matching Provinsi",
+                index=False
+            )
+
+            kabupaten.to_excel(
+                writer,
+                sheet_name="Matching Kabupaten",
+                index=False
+            )
+
+            file_error.to_excel(
+                writer,
+                sheet_name="Peringatan",
+                index=False
+            )
+
+        st.download_button(
+            "Download Laporan Matching",
+            data=output.getvalue(),
+            file_name="Laporan_Matching_Tahap_2.xlsx",
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            type="primary",
+            use_container_width=True
+        )
+
+    st.stop()
+
+
+# ============================================================
+# 7. TAHAP SELANJUTNYA
+# ============================================================
+
+if TAHAP in [
+    "3. Validasi Indikator",
+    "4. Dashboard Peta",
+    "5. Ekspor Hasil"
+]:
+
+    st.title(TAHAP)
+
+    st.info(
+        "Tahap ini belum diaktifkan. "
+        "Selesaikan dan verifikasi Tahap 2 terlebih dahulu."
+    )
+
+    st.stop()
+
+
+# ============================================================
+# JIKA TAHAP 1 DIPILIH
+# KODE TAHAP 1 LAMA AKAN DILANJUTKAN DI BAWAH INI
+# ============================================================

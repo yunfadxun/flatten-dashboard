@@ -1,22 +1,32 @@
 # ============================================================
-# STREAMLIT APP: SURVEILANS MR - TAHAP 1
-# UPLOAD DAN FLATTEN HEADER EXCEL
+# STREAMLIT APP
+# DASHBOARD SURVEILANS CAMPAK-RUBELLA
+#
+# TAHAP 1:
+# - Upload Excel
+# - Flatten header baris Excel 9-10
+#
+# TAHAP 2:
+# - Upload ZIP GeoJSON
+# - Identifikasi boundary ADM1 dan ADM2
+# - Matching provinsi dan kabupaten/kota
 # ============================================================
 
 import re
 import zipfile
-import traceback
+import unicodedata
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pandas as pd
 import streamlit as st
 
+from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 
 # ============================================================
-# 1. KONFIGURASI STREAMLIT
+# 1. KONFIGURASI APLIKASI
 # ============================================================
 
 st.set_page_config(
@@ -25,66 +35,74 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("Dashboard Surveilans Campak-Rubella")
-
-st.subheader("Tahap 1 — Flatten Header Excel")
-
-st.info(
-    "Tahap ini hanya memproses header Excel. "
-    "Proses boundary, matching wilayah, validasi indikator, "
-    "dan pembuatan peta akan dilakukan pada tahap berikutnya."
-)
-
-
-# ============================================================
-# 2. KONFIGURASI PEMROSESAN
-# ============================================================
-
 SHEET_ANALISIS = "Tabel Analisis"
+SHEET_KABUPATEN = "Tabel Analisis Pusat by Kab"
 
-SHEET_KAKO = "Tabel Analisis Pusat by Kab"
-
+# Index pandas berbasis nol:
+# 8 = baris Excel 9
+# 9 = baris Excel 10
+# 10 = baris Excel 11
 HEADER_START = 8
 HEADER_END = 9
 DATA_START = 10
 
 MAX_FILE_SIZE_MB = 50
-
-
-st.markdown(
-    """
-    **Ketentuan file:**
-    - Format: XLSM atau XLSX.
-    - Header: baris Excel 9–10.
-    - Data dimulai dari baris Excel 11.
-    - Sheet yang diproses:
-        1. `Tabel Analisis`
-        2. `Tabel Analisis Pusat by Kab`
-    """
-)
+MAX_BOUNDARY_SIZE_MB = 200
 
 
 # ============================================================
-# 3. UPLOAD FILE
+# 2. SESSION STATE
 # ============================================================
 
-uploaded_files = st.file_uploader(
-    "Upload file Excel",
-    type=["xlsm", "xlsx"],
-    accept_multiple_files=True,
-    help=(
-        "Upload file Excel yang akan diproses. "
-        f"Maksimum {MAX_FILE_SIZE_MB} MB per file."
+DEFAULT_SESSION_STATE = {
+    "hasil_flatten": [],
+    "hasil_flatten_gagal": [],
+    "hasil_matching": None,
+    "boundary_zip_name": None,
+}
+
+for key, default_value in DEFAULT_SESSION_STATE.items():
+    if key not in st.session_state:
+        st.session_state[key] = default_value
+
+
+# ============================================================
+# 3. FUNGSI NORMALISASI DASAR
+# ============================================================
+
+def normalisasi_dasar(teks):
+    """
+    Normalisasi umum untuk nama wilayah:
+    - Mengubah menjadi huruf kapital
+    - Menghapus aksen
+    - Mengganti tanda baca dengan spasi
+    - Merapikan spasi
+    """
+    if teks is None or pd.isna(teks):
+        return ""
+
+    hasil = str(teks).strip().upper()
+
+    if not hasil or hasil in {"NAN", "NONE", "NULL"}:
+        return ""
+
+    hasil = unicodedata.normalize("NFKD", hasil)
+    hasil = "".join(
+        karakter
+        for karakter in hasil
+        if not unicodedata.combining(karakter)
     )
-)
 
+    hasil = hasil.replace("&", " DAN ")
+    hasil = re.sub(r"[/_,.;:()\-]+", " ", hasil)
+    hasil = re.sub(r"[^A-Z0-9 ]+", " ", hasil)
+    hasil = re.sub(r"\s+", " ", hasil).strip()
 
-# ============================================================
-# 4. NORMALISASI NAMA SHEET
-# ============================================================
+    return hasil
+
 
 def normalisasi_nama_sheet(nama):
-
+    """Normalisasi nama sheet untuk pencarian."""
     return re.sub(
         r"[^a-z0-9]",
         "",
@@ -92,694 +110,19 @@ def normalisasi_nama_sheet(nama):
     )
 
 
-# ============================================================
-# 5. CARI SHEET
-# ============================================================
-
-def cari_sheet(sheet_names, target_sheet):
-
-    target_normal = normalisasi_nama_sheet(
-        target_sheet
-    )
-
-    # Pencarian nama yang sama setelah normalisasi.
-    for nama in sheet_names:
-
-        if normalisasi_nama_sheet(nama) == target_normal:
-            return nama
-
-    # Pencarian nama target sebagai bagian nama sheet.
-    for nama in sheet_names:
-
-        if target_normal in normalisasi_nama_sheet(nama):
-            return nama
-
-    return None
-
-
-# ============================================================
-# 6. FLATTEN HEADER
-# ============================================================
-
-def flatten_excel_header(
-    file_bytes,
-    sheet_name,
-    header_start=HEADER_START,
-    header_end=HEADER_END,
-    data_start=DATA_START
-):
-
-    # Baca data mentah tanpa header.
-    raw = pd.read_excel(
-        BytesIO(file_bytes),
-        sheet_name=sheet_name,
-        header=None,
-        engine="openpyxl"
-    )
-
-    if raw.empty:
-
-        raise ValueError(
-            f"Sheet '{sheet_name}' tidak memiliki data."
-        )
-
-    if len(raw) <= header_end:
-
-        raise ValueError(
-            f"Header baris 9–10 tidak ditemukan "
-            f"pada sheet '{sheet_name}'."
-        )
-
-    # Ambil dua baris header.
-    header_rows = raw.iloc[
-        header_start:header_end + 1
-    ].copy()
-
-    # Bersihkan nilai header.
-    header_rows = header_rows.map(
-        lambda x: (
-            str(x).strip()
-            if pd.notna(x) and str(x).strip() != ""
-            else None
-        )
-    )
-
-    # Isi header kelompok ke kanan.
-    header_rows = header_rows.ffill(axis=1)
-
-    # Gabungkan nama header.
-    new_columns = []
-
-    for col_idx in range(raw.shape[1]):
-
-        parts = []
-
-        for row_idx in range(len(header_rows)):
-
-            value = header_rows.iloc[
-                row_idx,
-                col_idx
-            ]
-
-            if value is not None:
-
-                value = str(value).strip()
-
-                if value and (
-                    not parts or value != parts[-1]
-                ):
-
-                    parts.append(value)
-
-        if parts:
-
-            col_name = "_".join(parts)
-
-        else:
-
-            col_name = f"Kolom_{col_idx + 1}"
-
-        new_columns.append(col_name)
-
-    # Pastikan nama kolom unik.
-    seen = {}
-
-    unique_columns = []
-
-    for col in new_columns:
-
-        if col not in seen:
-
-            seen[col] = 0
-
-            unique_columns.append(col)
-
-        else:
-
-            seen[col] += 1
-
-            unique_columns.append(
-                f"{col}_{seen[col]}"
-            )
-
-    # Ambil data setelah baris header.
-    df = raw.iloc[data_start:].copy()
-
-    df.columns = unique_columns
-
-    # Hapus baris yang seluruhnya kosong.
-    df = df.dropna(how="all")
-
-    # Hapus kolom yang seluruh datanya kosong.
-    df = df.dropna(
-        axis=1,
-        how="all"
-    )
-
-    return df.reset_index(drop=True)
-
-
-# ============================================================
-# 7. SIMPAN HASIL KE EXCEL
-# ============================================================
-
-def dataframe_to_excel(hasil_sheet):
-
-    output = BytesIO()
-
-    with pd.ExcelWriter(
-        output,
-        engine="openpyxl"
-    ) as writer:
-
-        for nama_sheet, df in hasil_sheet.items():
-
-            nama_sheet_output = nama_sheet[:31]
-
-            df.to_excel(
-                writer,
-                sheet_name=nama_sheet_output,
-                index=False
-            )
-
-            ws = writer.sheets[nama_sheet_output]
-
-            # Bekukan baris header.
-            ws.freeze_panes = "A2"
-
-            # Aktifkan filter.
-            ws.auto_filter.ref = ws.dimensions
-
-            # Atur lebar kolom berdasarkan sampel data.
-            for col_idx, col_name in enumerate(
-                df.columns,
-                start=1
-            ):
-
-                sample_values = df[col_name].head(200)
-
-                max_length = max(
-                    [len(str(col_name))]
-                    + [
-                        len(str(value))
-                        for value in sample_values
-                        if pd.notna(value)
-                    ]
-                )
-
-                col_letter = get_column_letter(
-                    col_idx
-                )
-
-                ws.column_dimensions[
-                    col_letter
-                ].width = min(
-                    max_length + 2,
-                    40
-                )
-
-    output.seek(0)
-
-    return output.getvalue()
-
-
-# ============================================================
-# 8. PROSES SATU FILE
-# ============================================================
-
-def proses_satu_file(file_bytes, nama_file):
-
-    hasil_sheet = {}
-
-    log = []
-
-    # Baca daftar sheet.
-    excel = pd.ExcelFile(
-        BytesIO(file_bytes),
-        engine="openpyxl"
-    )
-
-    sheet_names = excel.sheet_names
-
-    # --------------------------------------------------------
-    # SHEET TABEL ANALISIS
-    # --------------------------------------------------------
-
-    sheet_analisis = cari_sheet(
-        sheet_names,
-        SHEET_ANALISIS
-    )
-
-    if sheet_analisis:
-
-        df_analisis = flatten_excel_header(
-            file_bytes=file_bytes,
-            sheet_name=sheet_analisis
-        )
-
-        hasil_sheet[
-            "Tabel Analisis"
-        ] = df_analisis
-
-        log.append({
-            "Nama File": nama_file,
-            "Sheet": SHEET_ANALISIS,
-            "Status": "Berhasil",
-            "Baris": len(df_analisis),
-            "Kolom": len(df_analisis.columns),
-            "Keterangan": "Header berhasil di-flatten."
-        })
-
-    else:
-
-        log.append({
-            "Nama File": nama_file,
-            "Sheet": SHEET_ANALISIS,
-            "Status": "Tidak ditemukan",
-            "Baris": 0,
-            "Kolom": 0,
-            "Keterangan": (
-                "Sheet tidak ditemukan. "
-                f"Sheet tersedia: {sheet_names}"
-            )
-        })
-
-    # --------------------------------------------------------
-    # SHEET TABEL ANALISIS PUSAT BY KAB
-    # --------------------------------------------------------
-
-    sheet_kako = cari_sheet(
-        sheet_names,
-        SHEET_KAKO
-    )
-
-    if sheet_kako:
-
-        df_kako = flatten_excel_header(
-            file_bytes=file_bytes,
-            sheet_name=sheet_kako
-        )
-
-        hasil_sheet[
-            "Analisis Pusat by Kab"
-        ] = df_kako
-
-        log.append({
-            "Nama File": nama_file,
-            "Sheet": SHEET_KAKO,
-            "Status": "Berhasil",
-            "Baris": len(df_kako),
-            "Kolom": len(df_kako.columns),
-            "Keterangan": "Header berhasil di-flatten."
-        })
-
-    else:
-
-        log.append({
-            "Nama File": nama_file,
-            "Sheet": SHEET_KAKO,
-            "Status": "Tidak ditemukan",
-            "Baris": 0,
-            "Kolom": 0,
-            "Keterangan": (
-                "Sheet tidak ditemukan. "
-                f"Sheet tersedia: {sheet_names}"
-            )
-        })
-
-    # --------------------------------------------------------
-    # VALIDASI HASIL
-    # --------------------------------------------------------
-
-    if not hasil_sheet:
-
-        raise ValueError(
-            "Kedua sheet target tidak ditemukan. "
-            f"Sheet yang tersedia: {sheet_names}"
-        )
-
-    # Buat file Excel hasil flatten.
-    output_bytes = dataframe_to_excel(
-        hasil_sheet
-    )
-
-    nama_output = (
-        f"{Path(nama_file).stem}_Flatten_Header.xlsx"
-    )
-
-    return {
-        "nama_input": nama_file,
-        "nama_output": nama_output,
-        "data": output_bytes,
-        "log": log
-    }
-
-
-# ============================================================
-# 9. TAMPILKAN FILE YANG DIUPLOAD
-# ============================================================
-
-if uploaded_files:
-
-    st.subheader("File yang Diunggah")
-
-    daftar_file = []
-
-    for file in uploaded_files:
-
-        ukuran_mb = file.size / (1024 * 1024)
-
-        daftar_file.append({
-            "Nama File": file.name,
-            "Ukuran (MB)": round(ukuran_mb, 2),
-            "Status": (
-                "Siap diproses"
-                if ukuran_mb <= MAX_FILE_SIZE_MB
-                else "Melebihi batas ukuran"
-            )
-        })
-
-    st.dataframe(
-        pd.DataFrame(daftar_file),
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-# ============================================================
-# 10. TOMBOL PEMROSESAN
-# ============================================================
-
-if st.button(
-    "Proses dan Flatten Header",
-    type="primary",
-    use_container_width=True,
-    disabled=not uploaded_files
-):
-
-    file_valid = [
-        file
-        for file in uploaded_files
-        if file.size <= MAX_FILE_SIZE_MB * 1024 * 1024
-    ]
-
-    file_terlalu_besar = [
-        file.name
-        for file in uploaded_files
-        if file.size > MAX_FILE_SIZE_MB * 1024 * 1024
-    ]
-
-    if file_terlalu_besar:
-
-        st.warning(
-            "File berikut melebihi batas ukuran: "
-            + ", ".join(file_terlalu_besar)
-        )
-
-    if not file_valid:
-
-        st.error(
-            "Tidak ada file yang memenuhi batas ukuran."
-        )
-
-    else:
-
-        hasil_berhasil = []
-
-        hasil_gagal = []
-
-        progress = st.progress(0)
-
-        status_text = st.empty()
-
-        for nomor, file in enumerate(
-            file_valid,
-            start=1
-        ):
-
-            status_text.write(
-                f"Memproses {nomor}/{len(file_valid)}: "
-                f"{file.name}"
-            )
-
-            try:
-
-                file_bytes = file.getvalue()
-
-                hasil = proses_satu_file(
-                    file_bytes=file_bytes,
-                    nama_file=file.name
-                )
-
-                hasil_berhasil.append(hasil)
-
-            except Exception as error:
-
-                hasil_gagal.append({
-                    "Nama File": file.name,
-                    "Jenis Error": type(error).__name__,
-                    "Detail Error": str(error)
-                })
-
-            progress.progress(
-                nomor / len(file_valid)
-            )
-
-        status_text.write(
-            "Pemrosesan selesai."
-        )
-
-        # Simpan hasil pemrosesan.
-        st.session_state["hasil_flatten"] = (
-            hasil_berhasil
-        )
-
-        st.session_state["hasil_flatten_gagal"] = (
-            hasil_gagal
-        )
-
-
-# ============================================================
-# 11. TAMPILKAN HASIL
-# ============================================================
-
-if "hasil_flatten" in st.session_state:
-
-    hasil_berhasil = st.session_state[
-        "hasil_flatten"
-    ]
-
-    hasil_gagal = st.session_state.get(
-        "hasil_flatten_gagal",
-        []
-    )
-
-    st.divider()
-
-    st.subheader("Hasil Tahap 1")
-
-    col1, col2, col3 = st.columns(3)
-
-    col1.metric(
-        "File berhasil",
-        len(hasil_berhasil)
-    )
-
-    col2.metric(
-        "File gagal",
-        len(hasil_gagal)
-    )
-
-    col3.metric(
-        "Total file",
-        len(hasil_berhasil) + len(hasil_gagal)
-    )
-
-    # --------------------------------------------------------
-    # LAPORAN FLATTEN
-    # --------------------------------------------------------
-
-    if hasil_berhasil:
-
-        st.subheader("Laporan Flatten")
-
-        daftar_log = []
-
-        for hasil in hasil_berhasil:
-
-            daftar_log.extend(
-                hasil["log"]
-            )
-
-        st.dataframe(
-            pd.DataFrame(daftar_log),
-            use_container_width=True,
-            hide_index=True
-        )
-
-        # ----------------------------------------------------
-        # DOWNLOAD PER FILE
-        # ----------------------------------------------------
-
-        st.subheader("Download Hasil Excel")
-
-        for hasil in hasil_berhasil:
-
-            with st.container(border=True):
-
-                st.write(
-                    f"**{hasil['nama_output']}**"
-                )
-
-                st.download_button(
-                    label="Download Excel",
-                    data=hasil["data"],
-                    file_name=hasil["nama_output"],
-                    mime=(
-                        "application/vnd.openxmlformats-officedocument."
-                        "spreadsheetml.sheet"
-                    ),
-                    key=f"download_{hasil['nama_output']}",
-                    use_container_width=True
-                )
-
-        # ----------------------------------------------------
-        # DOWNLOAD ZIP
-        # ----------------------------------------------------
-
-        zip_buffer = BytesIO()
-
-        with zipfile.ZipFile(
-            zip_buffer,
-            mode="w",
-            compression=zipfile.ZIP_DEFLATED
-        ) as zip_file:
-
-            for hasil in hasil_berhasil:
-
-                zip_file.writestr(
-                    hasil["nama_output"],
-                    hasil["data"]
-                )
-
-        st.download_button(
-            label="Download Semua Hasil (ZIP)",
-            data=zip_buffer.getvalue(),
-            file_name="Hasil_Flatten_Header.zip",
-            mime="application/zip",
-            type="primary",
-            use_container_width=True
-        )
-
-    # --------------------------------------------------------
-    # LAPORAN ERROR
-    # --------------------------------------------------------
-
-    if hasil_gagal:
-
-        st.error(
-            "Ada file yang gagal diproses. "
-            "Periksa detail error di bawah."
-        )
-
-        st.dataframe(
-            pd.DataFrame(hasil_gagal),
-            use_container_width=True,
-            hide_index=True
-        )
-
-    elif hasil_berhasil:
-
-        st.success(
-            "Pemrosesan flatten selesai. "
-            "Silakan periksa dan unduh hasilnya."
-        )
-
-    # --------------------------------------------------------
-    # RESET
-    # --------------------------------------------------------
-
-    if st.button("Reset Hasil"):
-
-        st.session_state.pop(
-            "hasil_flatten",
-            None
-        )
-
-        st.session_state.pop(
-            "hasil_flatten_gagal",
-            None
-        )
-
-        st.rerun()
-
-
-# ============================================================
-# 12. INFORMASI TAHAP BERIKUTNYA
-# ============================================================
-
-st.divider()
-
-st.caption(
-    "Tahap berikutnya: boundary GeoJSON, matching wilayah, "
-    "validasi indikator, dan dashboard peta."
-)
-
-
-# ============================================================
-# SIDEBAR NAVIGATION + TAHAP 2
-# ============================================================
-
-import json
-import re
-import unicodedata
-from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
-
-
-# ============================================================
-# 1. NAVIGASI TAHAP
-# ============================================================
-
-st.sidebar.title("Surveilans MR")
-
-st.sidebar.caption(
-    "Pengolahan data dan dashboard peta"
-)
-
-TAHAP = st.sidebar.radio(
-    "NAVIGASI TAHAP",
-    [
-        "1. Upload & Flatten",
-        "2. Boundary & Matching",
-        "3. Validasi Indikator",
-        "4. Dashboard Peta",
-        "5. Ekspor Hasil",
-    ],
-    key="navigasi_tahap"
-)
-
-st.sidebar.divider()
-
-tahap_selesai = (
-    "hasil_flatten" in st.session_state
-    and len(st.session_state["hasil_flatten"]) > 0
-)
-
-if tahap_selesai:
-    st.sidebar.success("Tahap 1: Hasil tersedia")
-else:
-    st.sidebar.info("Tahap 1: Belum ada hasil")
-# ============================================================
-# NORMALISASI NAMA PROVINSI
-# ============================================================
-
 def normalisasi_provinsi(teks):
-
+    """Normalisasi dan alias nama provinsi."""
     hasil = normalisasi_dasar(teks)
 
     if not hasil:
         return ""
+
+    # Hapus prefiks administratif bila ada.
+    hasil = re.sub(
+        r"^(PROVINSI|PROPINSI|PROV)\s+",
+        "",
+        hasil
+    ).strip()
 
     alias = {
         "JAKARTA": "DKI JAKARTA",
@@ -803,646 +146,429 @@ def normalisasi_provinsi(teks):
 
         "NANGGROE ACEH DARUSSALAM": "ACEH",
 
-        "SUMATERA SELATAN": "SUMATERA SELATAN",
-        "SUMATERA UTARA": "SUMATERA UTARA",
-        "SUMATERA BARAT": "SUMATERA BARAT",
+        "IRIAN JAYA BARAT": "PAPUA BARAT",
     }
 
     return alias.get(hasil, hasil)
 
+
 def normalisasi_kabupaten(teks):
+    """
+    Normalisasi nama kabupaten/kota.
 
-    # ========================================================
-    # 1. NORMALISASI DASAR
-    # ========================================================
-
+    Tipe KABUPATEN/KOTA sengaja dihilangkan. Pada tahap matching,
+    nama kabupaten dipadukan dengan nama provinsi untuk menghindari
+    benturan nama wilayah antarprovinsi.
+    """
     hasil = normalisasi_dasar(teks)
 
     if not hasil:
         return ""
 
-    # ========================================================
-    # 2. HAPUS AWALAN ADMINISTRATIF KABUPATEN
-    # ========================================================
-
     hasil = re.sub(
-        r"^(KABUPATEN|KAB)\s+",
+        r"^(KABUPATEN|KAB|KOTA ADMINISTRASI|KOTA ADM|KOTA)\s+",
         "",
         hasil
     ).strip()
 
-    # ========================================================
-    # 3. ALIAS NAMA KABUPATEN/KOTA
-    # ========================================================
-
     alias = {
-
-        # ----------------------------------------------------
-        # NAMA WILAYAH YANG BERUBAH
-        # ----------------------------------------------------
-
+        # Perubahan nama wilayah
         "TOBA SAMOSIR": "TOBA",
+        "MALUKU TENGGARA BARAT": "KEPULAUAN TANIMBAR",
+        "MAMUJU UTARA": "PASANGKAYU",
 
-        "MALUKU TENGGARA BARAT":
-            "KEPULAUAN TANIMBAR",
-
-        "MAMUJU UTARA":
-            "PASANGKAYU",
-
-        # ----------------------------------------------------
-        # VARIASI PENULISAN NAMA
-        # ----------------------------------------------------
-
-        "GUNUNG KIDUL":
-            "GUNUNGKIDUL",
-
-        "PEMATANG SIANTAR":
-            "PEMATANGSIANTAR",
-
-        "PADANG SIDEMPUAN":
-            "PADANGSIDIMPUAN",
-
-        "PADANG SIDIMPUAN":
-            "PADANGSIDIMPUAN",
-
-        "DHARMAS RAYA":
-            "DHARMASRAYA",
-
-        "PARE PARE":
-            "PAREPARE",
-
+        # Variasi penulisan
+        "GUNUNG KIDUL": "GUNUNGKIDUL",
+        "PEMATANG SIANTAR": "PEMATANGSIANTAR",
+        "PADANG SIDEMPUAN": "PADANGSIDIMPUAN",
+        "PADANG SIDIMPUAN": "PADANGSIDIMPUAN",
+        "DHARMAS RAYA": "DHARMASRAYA",
+        "PARE PARE": "PAREPARE",
         "PANGKAJENE KEPULAUAN":
             "PANGKAJENE DAN KEPULAUAN",
+        "SELAYAR": "KEPULAUAN SELAYAR",
+        "BAU BAU": "BAUBAU",
+        "YAPEN WAROPEN": "KEPULAUAN YAPEN",
+        "POLIWALI MANDAR": "POLEWALI MANDAR",
+        "TAMBRAW": "TAMBRAUW",
+        "GUNUNG SITOLI": "GUNUNGSITOLI",
+        "BANJAR BARU": "BANJARBARU",
 
-        "SELAYAR":
-            "KEPULAUAN SELAYAR",
+        # DKI Jakarta
+        "JAKARTA PUSAT": "JAKARTAPUSAT",
+        "JAKARTA UTARA": "JAKARTAUTARA",
+        "JAKARTA BARAT": "JAKARTABARAT",
+        "JAKARTA SELATAN": "JAKARTASELATAN",
+        "JAKARTA TIMUR": "JAKARTATIMUR",
+        "KEPULAUAN SERIBU": "KEPULAUANSERIBU",
 
-        "BAU BAU":
-            "BAUBAU",
-
-        "YAPEN WAROPEN":
-            "KEPULAUAN YAPEN",
-
-        "POLIWALI MANDAR":
-            "POLEWALI MANDAR",
-
-        "TAMBRAW":
-            "TAMBRAUW",
-
-        # ----------------------------------------------------
-        # KOTA DENGAN VARIASI PENULISAN
-        # ----------------------------------------------------
-
-        "KOTA GUNUNG SITOLI":
-            "GUNUNGSITOLI",
-
-        "KOTA PARE PARE":
-            "PAREPARE",
-
-        "KOTA BAU BAU":
-            "BAUBAU",
-
-        "KOTA PADANGSIDEMPUAN":
-            "PADANGSIDIMPUAN",
-
-        "KOTA PADANG SIDEMPUAN":
-            "PADANGSIDIMPUAN",
-
-        "KOTA PEMATANG SIANTAR":
-            "PEMATANGSIANTAR",
-
-        "KOTA BANJAR BARU":
-            "BANJARBARU",
-
-        "KOTA BARU":
-            "KOTABARU",
-
-        # ----------------------------------------------------
-        # DKI JAKARTA
-        # ----------------------------------------------------
-
-        "KOTA JAKARTA PUSAT":
-            "JAKARTAPUSAT",
-
-        "KOTA JAKARTA UTARA":
-            "JAKARTAUTARA",
-
-        "KOTA JAKARTA BARAT":
-            "JAKARTABARAT",
-
-        "KOTA JAKARTA SELATAN":
-            "JAKARTASELATAN",
-
-        "KOTA JAKARTA TIMUR":
-            "JAKARTATIMUR",
-
-        "KEPULAUAN SERIBU":
-            "KEPULAUANSERIBU",
-
-        # ----------------------------------------------------
-        # SULAWESI UTARA
-        # ----------------------------------------------------
-
+        # Sulawesi Utara
         "SIAU TAGULANDANG BIARO":
             "SIAUTAGULANDANGBIARO",
-
     }
 
-    # ========================================================
-    # 4. TERAPKAN ALIAS
-    # ========================================================
+    hasil = alias.get(hasil, hasil)
 
-    if hasil in alias:
-
-        hasil = alias[hasil]
-
-    else:
-
-        # Hapus awalan KOTA untuk nama kota yang tidak
-        # memiliki alias khusus.
-        if hasil.startswith("KOTA "):
-
-            hasil = hasil[5:].strip()
-
-    # ========================================================
-    # 5. SAMAKAN FORMAT AKHIR
-    # ========================================================
-
-    # Hilangkan spasi agar perbedaan format nama tidak
-    # menyebabkan ketidakcocokan.
-
+    # Menghilangkan spasi untuk toleransi variasi penulisan.
     hasil = hasil.replace(" ", "")
 
     return hasil
 
 
+def buat_key_kabupaten(provinsi, kabupaten):
+    """Membuat key gabungan provinsi dan kabupaten/kota."""
+    provinsi_norm = normalisasi_provinsi(provinsi)
+    kabupaten_norm = normalisasi_kabupaten(kabupaten)
+
+    if not kabupaten_norm:
+        return ""
+
+    if provinsi_norm:
+        return f"{provinsi_norm}||{kabupaten_norm}"
+
+    return kabupaten_norm
+
 
 # ============================================================
-# 4. IDENTIFIKASI KOLOM EXCEL
+# 4. FUNGSI PENCARIAN SHEET DAN KOLOM
 # ============================================================
 
-def cari_kolom(df, nama_target):
+def cari_sheet(sheet_names, target_sheet):
+    """
+    Cari sheet secara berurutan:
+    1. Kecocokan persis setelah normalisasi
+    2. Kecocokan parsial
+    """
+    target_normal = normalisasi_nama_sheet(target_sheet)
 
-    def norm_kolom(teks):
-        return re.sub(
-            r"[^a-z0-9]",
-            "",
-            str(teks).lower()
-        )
+    for nama in sheet_names:
+        if normalisasi_nama_sheet(nama) == target_normal:
+            return nama
 
-    target = norm_kolom(nama_target)
+    for nama in sheet_names:
+        if target_normal in normalisasi_nama_sheet(nama):
+            return nama
 
-    # Prioritaskan kecocokan persis.
-    for kolom in df.columns:
+    return None
 
-        if norm_kolom(kolom) == target:
-            return kolom
 
-    # Jika nama header memiliki awalan tambahan.
-    for kolom in df.columns:
+def norm_kolom(teks):
+    """Normalisasi sederhana nama kolom."""
+    return re.sub(
+        r"[^a-z0-9]",
+        "",
+        str(teks).lower()
+    )
 
-        if target in norm_kolom(kolom):
-            return kolom
+
+def cari_kolom(df, kandidat_nama):
+    """
+    Mencari kolom berdasarkan satu atau beberapa kandidat nama.
+
+    Kandidat pertama memiliki prioritas tertinggi.
+    """
+    if isinstance(kandidat_nama, str):
+        kandidat_nama = [kandidat_nama]
+
+    # Pertama: exact match.
+    for target in kandidat_nama:
+        target_norm = norm_kolom(target)
+
+        for kolom in df.columns:
+            if norm_kolom(kolom) == target_norm:
+                return kolom
+
+    # Kedua: partial match.
+    for target in kandidat_nama:
+        target_norm = norm_kolom(target)
+
+        for kolom in df.columns:
+            kolom_norm = norm_kolom(kolom)
+
+            if target_norm and target_norm in kolom_norm:
+                return kolom
 
     return None
 
 
 # ============================================================
-# 5. PROSES MATCHING
+# 5. FLATTEN HEADER EXCEL
 # ============================================================
 
-def buat_laporan_matching(
-    hasil_flatten,
-    files_provinsi,
-    files_kabupaten
+def bersihkan_nilai_header(value):
+    """Bersihkan satu nilai pada header."""
+    if pd.isna(value):
+        return None
+
+    value = str(value).strip()
+
+    if not value or value.lower() == "nan":
+        return None
+
+    value = re.sub(r"\s+", " ", value)
+
+    return value
+
+
+def buat_nama_kolom_unik(nama_kolom):
+    """Tambahkan suffix pada nama kolom duplikat."""
+    seen = {}
+    hasil = []
+
+    for nama in nama_kolom:
+        if nama not in seen:
+            seen[nama] = 0
+            hasil.append(nama)
+        else:
+            seen[nama] += 1
+            hasil.append(f"{nama}_{seen[nama]}")
+
+    return hasil
+
+
+def flatten_excel_header(
+    file_bytes,
+    sheet_name,
+    header_start=HEADER_START,
+    header_end=HEADER_END,
+    data_start=DATA_START
 ):
+    """
+    Melakukan flatten header dua tingkat dari baris Excel 9-10.
 
-    boundary_provinsi = {
-        normalisasi_provinsi(
-            path.split("/")[-1]
-            .removesuffix(".geojson")
-            .replace("_", " ")
-        )
-        for path in files_provinsi
-    }
-
-    boundary_kabupaten = {
-        normalisasi_kabupaten(
-            path.split("/")[-1]
-            .removesuffix(".geojson")
-            .replace("_", " ")
-        )
-        for path in files_kabupaten
-    }
-
-    laporan_provinsi = []
-    laporan_kabupaten = []
-    laporan_file = []
-
-    for hasil in hasil_flatten:
-
-        nama_file = hasil["nama_input"]
-
-        excel_bytes = hasil["data"]
-
-        try:
-
-            excel = pd.ExcelFile(
-                BytesIO(excel_bytes),
-                engine="openpyxl"
-            )
-
-        except Exception as error:
-
-            laporan_file.append({
-                "Nama File": nama_file,
-                "Status": "Gagal membaca hasil flatten",
-                "Keterangan": str(error)
-            })
-
-            continue
-
-        # ----------------------------------------------------
-        # MATCHING PROVINSI
-        # ----------------------------------------------------
-
-        if "Tabel Analisis" in excel.sheet_names:
-
-            df_prov = pd.read_excel(
-                BytesIO(excel_bytes),
-                sheet_name="Tabel Analisis",
-                engine="openpyxl"
-            )
-
-            kolom_prov = cari_kolom(
-                df_prov,
-                "Kabupaten / Kota / Provinsi"
-            )
-
-            if kolom_prov is None:
-
-                laporan_file.append({
-                    "Nama File": nama_file,
-                    "Status": "Kolom provinsi tidak ditemukan",
-                    "Keterangan": (
-                        "Periksa header Tabel Analisis."
-                    )
-                })
-
-            else:
-
-                nilai_prov = (
-                    df_prov[kolom_prov]
-                    .dropna()
-                    .astype(str)
-                    .str.strip()
-                    .unique()
-                )
-
-                for nama in nilai_prov:
-
-                    key = normalisasi_provinsi(nama)
-
-                    if key in ("", "INDONESIA"):
-                        continue
-
-                    laporan_provinsi.append({
-                        "Nama File": nama_file,
-                        "Nama Provinsi Excel": nama,
-                        "Nama Normalisasi": key,
-                        "Status": (
-                            "Cocok"
-                            if key in boundary_provinsi
-                            else "Tidak cocok"
-                        )
-                    })
-
-        # ----------------------------------------------------
-        # MATCHING KABUPATEN/KOTA
-        # ----------------------------------------------------
-
-        if "Analisis Pusat by Kab" in excel.sheet_names:
-
-            df_kab = pd.read_excel(
-                BytesIO(excel_bytes),
-                sheet_name="Analisis Pusat by Kab",
-                engine="openpyxl"
-            )
-
-            kolom_kab = cari_kolom(
-                df_kab,
-                "Kabupaten / Kota"
-            )
-
-            kolom_prov_kab = cari_kolom(
-                df_kab,
-                "Provinsi"
-            )
-
-            if kolom_kab is None:
-
-                laporan_file.append({
-                    "Nama File": nama_file,
-                    "Status": "Kolom kabupaten/kota tidak ditemukan",
-                    "Keterangan": (
-                        "Periksa header Analisis Pusat by Kab."
-                    )
-                })
-
-            else:
-
-                kolom_yang_dibutuhkan = [kolom_kab]
-
-                if kolom_prov_kab:
-                    kolom_yang_dibutuhkan.append(
-                        kolom_prov_kab
-                    )
-
-                df_nama = (
-                    df_kab[kolom_yang_dibutuhkan]
-                    .dropna(subset=[kolom_kab])
-                    .drop_duplicates()
-                )
-
-                for _, row in df_nama.iterrows():
-
-                    nama_kab = str(row[kolom_kab]).strip()
-
-                    nama_prov = (
-                        str(row[kolom_prov_kab]).strip()
-                        if kolom_prov_kab
-                        and pd.notna(row[kolom_prov_kab])
-                        else ""
-                    )
-
-                    key_kab = normalisasi_kabupaten(
-                        nama_kab
-                    )
-
-                    if key_kab in ("", "INDONESIA"):
-                        continue
-
-                    laporan_kabupaten.append({
-                        "Nama File": nama_file,
-                        "Provinsi Excel": nama_prov,
-                        "Kabupaten/Kota Excel": nama_kab,
-                        "Nama Normalisasi": key_kab,
-                        "Status Nama Boundary": (
-                            "Cocok"
-                            if key_kab in boundary_kabupaten
-                            else "Tidak cocok"
-                        )
-                    })
-
-    return (
-        laporan_provinsi,
-        laporan_kabupaten,
-        laporan_file,
-        len(files_provinsi),
-        len(files_kabupaten)
+    Catatan penting:
+    merged cell pada header kelompok biasanya hanya mempunyai nilai
+    pada sel paling kiri. Karena itu, baris header pertama di-forward
+    fill ke kanan.
+    """
+    raw = pd.read_excel(
+        BytesIO(file_bytes),
+        sheet_name=sheet_name,
+        header=None,
+        engine="openpyxl"
     )
+
+    if raw.empty:
+        raise ValueError(
+            f"Sheet '{sheet_name}' tidak memiliki data."
+        )
+
+    if len(raw) <= header_end:
+        raise ValueError(
+            f"Header baris Excel 9-10 tidak ditemukan "
+            f"pada sheet '{sheet_name}'."
+        )
+
+    header_rows = raw.iloc[
+        header_start:header_end + 1
+    ].copy()
+
+    header_rows = header_rows.map(
+        bersihkan_nilai_header
+    )
+
+    # Forward fill hanya diperlukan untuk mempertahankan
+    # grup merged header ke kolom-kolom di sebelah kanan.
+    header_rows = header_rows.ffill(axis=1)
+
+    nama_kolom = []
+
+    for col_idx in range(raw.shape[1]):
+        parts = []
+
+        for row_idx in range(len(header_rows)):
+            value = header_rows.iloc[row_idx, col_idx]
+
+            if value is None:
+                continue
+
+            value = str(value).strip()
+
+            if value and value not in parts:
+                parts.append(value)
+
+        if parts:
+            col_name = "_".join(parts)
+        else:
+            col_name = f"Kolom_{col_idx + 1}"
+
+        col_name = re.sub(r"\s+", " ", col_name).strip()
+        nama_kolom.append(col_name)
+
+    nama_kolom = buat_nama_kolom_unik(nama_kolom)
+
+    df = raw.iloc[data_start:].copy()
+    df.columns = nama_kolom
+
+    # Ubah sel kosong berupa string menjadi NA.
+    df = df.replace(r"^\s*$", pd.NA, regex=True)
+
+    # Hapus baris dan kolom kosong.
+    df = df.dropna(how="all")
+    df = df.dropna(axis=1, how="all")
+
+    # Hapus nama kolom yang ikut terbuang.
+    df = df.reset_index(drop=True)
+
+    return df
 
 
 # ============================================================
-# 6. TAMPILKAN HALAMAN TAHAP 2
+# 6. MENYIMPAN DATAFRAME KE EXCEL
 # ============================================================
 
-if TAHAP == "2. Boundary & Matching":
+def format_worksheet(ws, df):
+    """Format dasar worksheet hasil flatten."""
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
 
-    st.title("Tahap 2 — Boundary & Matching")
-
-    st.write(
-        "Tahap ini mengambil daftar GeoJSON dari repository "
-        "boundary Indonesia dan mencocokkan nama wilayah "
-        "dengan hasil flatten Tahap 1."
+    header_fill = PatternFill(
+        fill_type="solid",
+        fgColor="1F4E78"
     )
 
-    if not tahap_selesai:
-
-        st.warning(
-            "Hasil Tahap 1 belum tersedia pada sesi ini. "
-            "Silakan buka Tahap 1 dan jalankan flatten terlebih dahulu."
-        )
-
-        st.stop()
-
-    st.info(
-        "Tahap ini memeriksa kecocokan nama berdasarkan daftar file "
-        "boundary. Geometri belum diunduh atau diproses pada tahap ini."
+    header_font = Font(
+        color="FFFFFF",
+        bold=True
     )
 
-    if st.button(
-        "Jalankan Boundary & Matching",
-        type="primary",
-        use_container_width=True
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+
+    for col_idx, col_name in enumerate(
+        df.columns,
+        start=1
     ):
+        sample_values = df[col_name].head(200)
 
-        try:
+        panjang = [len(str(col_name))]
 
-            with st.spinner(
-                "Mengambil daftar boundary dari GitHub..."
-            ):
+        panjang.extend([
+            len(str(value))
+            for value in sample_values
+            if pd.notna(value)
+        ])
 
-                (
-                    files_provinsi,
-                    files_kabupaten
-                ) = ambil_daftar_boundary()
+        max_length = max(panjang) if panjang else 10
+        col_letter = get_column_letter(col_idx)
 
-            st.success(
-                "Daftar boundary berhasil diambil."
-            )
-
-            with st.spinner(
-                "Mencocokkan nama wilayah..."
-            ):
-
-                (
-                    laporan_provinsi,
-                    laporan_kabupaten,
-                    laporan_file,
-                    jumlah_boundary_provinsi,
-                    jumlah_boundary_kabupaten
-                ) = buat_laporan_matching(
-                    st.session_state["hasil_flatten"],
-                    files_provinsi,
-                    files_kabupaten
-                )
-
-            st.session_state["hasil_matching"] = {
-                "provinsi": laporan_provinsi,
-                "kabupaten": laporan_kabupaten,
-                "file": laporan_file,
-                "jumlah_boundary_provinsi": jumlah_boundary_provinsi,
-                "jumlah_boundary_kabupaten": jumlah_boundary_kabupaten,
-            }
-
-        except (HTTPError, URLError, TimeoutError) as error:
-
-            st.error(
-                "Tidak dapat mengambil daftar boundary dari GitHub."
-            )
-
-            st.code(str(error))
-
-        except Exception as error:
-
-            st.error("Tahap 2 gagal dijalankan.")
-
-            st.exception(error)
-
-    # --------------------------------------------------------
-    # TAMPILKAN HASIL MATCHING
-    # --------------------------------------------------------
-
-    if "hasil_matching" in st.session_state:
-
-        hasil = st.session_state["hasil_matching"]
-
-        provinsi = pd.DataFrame(hasil["provinsi"])
-
-        kabupaten = pd.DataFrame(hasil["kabupaten"])
-
-        file_error = pd.DataFrame(hasil["file"])
-
-        st.divider()
-
-        st.subheader("Ringkasan Boundary")
-
-        col1, col2 = st.columns(2)
-
-        col1.metric(
-            "File boundary provinsi",
-            hasil["jumlah_boundary_provinsi"]
+        ws.column_dimensions[col_letter].width = min(
+            max(max_length + 2, 10),
+            40
         )
 
-        col2.metric(
-            "File boundary kabupaten/kota",
-            hasil["jumlah_boundary_kabupaten"]
-        )
 
-        if not provinsi.empty:
+def dataframe_to_excel(hasil_sheet):
+    """Simpan beberapa dataframe ke satu workbook Excel."""
+    output = BytesIO()
 
-            cocok = (
-                provinsi["Status"] == "Cocok"
-            ).sum()
+    with pd.ExcelWriter(
+        output,
+        engine="openpyxl"
+    ) as writer:
 
-            tidak_cocok = (
-                provinsi["Status"] == "Tidak cocok"
-            ).sum()
+        for nama_sheet, df in hasil_sheet.items():
+            nama_sheet_output = nama_sheet[:31]
 
-            st.subheader("Matching Provinsi")
-
-            col1, col2 = st.columns(2)
-
-            col1.metric("Cocok", int(cocok))
-
-            col2.metric("Tidak cocok", int(tidak_cocok))
-
-            st.dataframe(
-                provinsi,
-                use_container_width=True,
-                hide_index=True
-            )
-
-        if not kabupaten.empty:
-
-            cocok = (
-                kabupaten["Status Nama Boundary"] == "Cocok"
-            ).sum()
-
-            tidak_cocok = (
-                kabupaten["Status Nama Boundary"] == "Tidak cocok"
-            ).sum()
-
-            st.subheader("Matching Kabupaten/Kota")
-
-            col1, col2 = st.columns(2)
-
-            col1.metric("Cocok", int(cocok))
-
-            col2.metric("Tidak cocok", int(tidak_cocok))
-
-            st.dataframe(
-                kabupaten,
-                use_container_width=True,
-                hide_index=True
-            )
-
-        if not file_error.empty:
-
-            st.subheader("Peringatan Pembacaan File")
-
-            st.dataframe(
-                file_error,
-                use_container_width=True,
-                hide_index=True
-            )
-
-        # ----------------------------------------------------
-        # DOWNLOAD LAPORAN MATCHING
-        # ----------------------------------------------------
-
-        output = BytesIO()
-
-        with pd.ExcelWriter(
-            output,
-            engine="openpyxl"
-        ) as writer:
-
-            provinsi.to_excel(
+            df.to_excel(
                 writer,
-                sheet_name="Matching Provinsi",
+                sheet_name=nama_sheet_output,
                 index=False
             )
 
-            kabupaten.to_excel(
+            ws = writer.sheets[nama_sheet_output]
+            format_worksheet(ws, df)
+
+    output.seek(0)
+
+    return output.getvalue()
+
+
+def dataframe_dict_to_excel(hasil_sheet):
+    """Simpan dictionary dataframe untuk laporan matching."""
+    output = BytesIO()
+
+    with pd.ExcelWriter(
+        output,
+        engine="openpyxl"
+    ) as writer:
+
+        for nama_sheet, df in hasil_sheet.items():
+            if df is None or df.empty:
+                df = pd.DataFrame({
+                    "Informasi": ["Tidak ada data."]
+                })
+
+            df.to_excel(
                 writer,
-                sheet_name="Matching Kabupaten",
+                sheet_name=nama_sheet[:31],
                 index=False
             )
 
-            file_error.to_excel(
-                writer,
-                sheet_name="Peringatan",
-                index=False
-            )
+            ws = writer.sheets[nama_sheet[:31]]
+            format_worksheet(ws, df)
 
-        st.download_button(
-            "Download Laporan Matching",
-            data=output.getvalue(),
-            file_name="Laporan_Matching_Tahap_2.xlsx",
-            mime=(
-                "application/vnd.openxmlformats-officedocument."
-                "spreadsheetml.sheet"
-            ),
-            type="primary",
-            use_container_width=True
-        )
+    output.seek(0)
 
-    st.stop()
+    return output.getvalue()
 
 
 # ============================================================
-# 7. TAHAP SELANJUTNYA
+# 7. PROSES SATU FILE EXCEL
 # ============================================================
 
-if TAHAP in [
-    "3. Validasi Indikator",
-    "4. Dashboard Peta",
-    "5. Ekspor Hasil"
-]:
+def proses_satu_file(file_bytes, nama_file):
+    """Memproses dua sheet target dari satu workbook."""
+    hasil_sheet = {}
+    log = []
 
-    st.title(TAHAP)
-
-    st.info(
-        "Tahap ini belum diaktifkan. "
-        "Selesaikan dan verifikasi Tahap 2 terlebih dahulu."
+    excel = pd.ExcelFile(
+        BytesIO(file_bytes),
+        engine="openpyxl"
     )
 
-    st.stop()
+    sheet_names = excel.sheet_names
 
+    daftar_target = [
+        {
+            "target": SHEET_ANALISIS,
+            "output": "Tabel Analisis"
+        },
+        {
+            "target": SHEET_KABUPATEN,
+            "output": "Analisis Pusat by Kab"
+        },
+    ]
 
-# ============================================================
-# JIKA TAHAP 1 DIPILIH
-# KODE TAHAP 1 LAMA AKAN DILANJUTKAN DI BAWAH INI
-# ============================================================
+    for konfigurasi in daftar_target:
+        target = konfigurasi["target"]
+        output_name = konfigurasi["output"]
+
+        sheet_ditemukan = cari_sheet(
+            sheet_names,
+            target
+        )
+
+        if sheet_ditemukan:
+            try:
+                df = flatten_excel_header(
+                    file_bytes=file_bytes,
+                    sheet_name=sheet_ditemukan
+                )
+
+                hasil_sheet[output_name] = df
+
+                log.append({
+                    "Nama File": nama_file,
+                    "Sheet Target": target,
+                    "Sheet Ditemukan": sheet_ditemukan,
+                    "Status": "Berhasil",
+                    "Baris": len(df),
+                    "Kolom": len(df.columns),
+                    "Keterangan": "Header berhasil di-flatten."
+                })
+
+            except Exception as error:
+                log.append({
+                    "Nama File":
